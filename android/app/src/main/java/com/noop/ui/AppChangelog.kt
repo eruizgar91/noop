@@ -25,7 +25,7 @@ object AppChangelog {
      * Bump this when you add a release below. The "What's New" sheet shows automatically when the
      * stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
      */
-    const val CURRENT_VERSION = "1.81"
+    const val CURRENT_VERSION = "1.82"
 
     data class Release(
         val version: String,
@@ -36,6 +36,18 @@ object AppChangelog {
 
     /** Newest first. */
     val releases: List<Release> = listOf(
+        Release(
+            version = "1.82",
+            title = "Stop losing strap history we can't yet decode — plus a board of fixes",
+            date = "June 2026",
+            items = listOf(
+                "Fixed (Mac and Android): NOOP no longer destroys strap history it can't yet decode. If a history chunk arrived with a bad checksum or a firmware record layout we haven't mapped, NOOP used to tell the strap \"got it\" anyway — and the strap then freed (erased) that data while the screen said \"synced\". NOOP now archives those raw records on-device before acknowledging, and if it can't save them it leaves them on the strap to retry, so an unrecognised firmware can no longer cost you your data. (#77, #91)",
+                "Fixed (Android): a Health Connect sync no longer blanks a strap-only day. With no WHOOP import, a sync could write a sparse day record that hid your on-device recovery/strain and regressed your sleep stages; Health Connect now only fills days your strap didn't already cover. Nothing was deleted — this restores it. (#112)",
+                "Fixed (Android): the Today screen's Steps, Calories and Weight tiles now show real data instead of always reading \"no data\". Weight falls back to your profile figure when there's no measured reading. (#107)",
+                "New (Mac): Google Gemini as a third bring-your-own-key AI Coach provider, alongside OpenAI and Anthropic.",
+                "New (Mac): a clear \"Standard HR mode\" note when the radio falls back to low-bandwidth heart rate (#80); a guard that refuses an Android backup on Mac instead of overwriting your database; and imported Apple Health body-weight now actually shows up.",
+            ),
+        ),
         Release(
             version = "1.81",
             title = "Start a workout from the Workouts screen, and an honest Smart-alarm note",

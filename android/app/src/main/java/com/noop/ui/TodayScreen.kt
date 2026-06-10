@@ -30,11 +30,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noop.analytics.Baselines
 import com.noop.analytics.ReadinessEngine
+import com.noop.data.AppleDaily
 import com.noop.data.DailyMetric
 import com.noop.data.WorkoutRow
 import java.time.Instant
@@ -61,6 +63,22 @@ fun TodayScreen(viewModel: AppViewModel, onSupport: () -> Unit = {}) {
     val days by viewModel.recentDays.collectAsStateWithLifecycle()
     val live by viewModel.live.collectAsStateWithLifecycle()
     var footer by remember { mutableStateOf(TodayFooterState()) }
+
+    // Display-only unit system + the SI profile weight, read once like every other Settings-backed
+    // preference (SharedPreferences isn't reactive — a Settings write triggers recomposition).
+    val context = LocalContext.current
+    val unitSystem = UnitPrefs.system(context)
+    val profileWeightKg = remember { ProfileStore.from(context).weightKg }
+
+    // The newest Apple Health / Health Connect body weight, loaded off the main thread. Null until the
+    // load runs or when neither source carries a weight — the Weight tile then falls back to the profile.
+    var weightKg by remember { mutableStateOf<Double?>(null) }
+    LaunchedEffect(days) {
+        weightKg = latestWeightKg(
+            viewModel.repo.appleDaily("apple-health", "0000-01-01", "9999-12-31"),
+            viewModel.repo.appleDaily("health-connect", "0000-01-01", "9999-12-31"),
+        )
+    }
 
     // Recovery cold-start: recovery is null until the HRV baseline crosses the seed gate
     // (Baselines.minNightsSeed valid nights). Show honest "calibrating — N of 4 nights" progress
@@ -164,7 +182,7 @@ fun TodayScreen(viewModel: AppViewModel, onSupport: () -> Unit = {}) {
         // METRICS — uniform tile grid (two columns), each tile with a 14-day sparkline.
         Spacer(Modifier.padding(top = (Metrics.sectionGap - 20.dp) / 2))
         SectionHeader("Key Metrics", overline = "Today", trailing = "14-day trend")
-        MetricGrid(today, window, recoveryCalibration)
+        MetricGrid(today, window, recoveryCalibration, unitSystem, weightKg, profileWeightKg)
         HeartRateTrendCard(viewModel, days)
         TodayWorkoutsSection(footer.recentWorkouts)
         TodaySourcesSection(footer)
@@ -232,7 +250,14 @@ internal fun recoveryCalibrationNights(
  * grid tiles perfectly with no empty cells.
  */
 @Composable
-private fun MetricGrid(d: DailyMetric?, w: Window, recoveryCalibration: Int? = null) {
+private fun MetricGrid(
+    d: DailyMetric?,
+    w: Window,
+    recoveryCalibration: Int? = null,
+    unitSystem: UnitSystem = UnitSystem.METRIC,
+    latestWeightKg: Double? = null,
+    profileWeightKg: Double = 75.0,
+) {
     val tiles = listOf<@Composable (Modifier) -> Unit>(
         { m ->
             SparkStatTile(
@@ -315,34 +340,41 @@ private fun MetricGrid(d: DailyMetric?, w: Window, recoveryCalibration: Int? = n
             )
         },
         { m ->
+            // On-device daily step total derived from the WHOOP5 @57 counter (DailyMetric.steps). (#107)
             SparkStatTile(
                 modifier = m,
                 label = "Steps",
-                value = NO_DATA,
-                caption = "not connected",
-                accent = Palette.textTertiary,
+                value = d?.steps?.let { intString(it.toDouble()) } ?: NO_DATA,
+                caption = d?.steps?.let { "today" },
+                accent = d?.steps?.let { Palette.metricCyan } ?: Palette.textTertiary,
                 spark = emptyList(),
                 sparkColor = Palette.metricCyan,
             )
         },
         { m ->
+            // Latest Apple Health / Health Connect body weight, else the SI profile weight (#107). The
+            // caption stays honest — "from profile" only when we fell back. Always shown in the user's
+            // chosen units via the shared UnitFormatter (matches AppleHealthScreen's weight tile).
+            val weight = weightTile(latestWeightKg, profileWeightKg, unitSystem)
             SparkStatTile(
                 modifier = m,
                 label = "Weight",
-                value = NO_DATA,
-                caption = "not connected",
-                accent = Palette.textTertiary,
+                value = weight.value,
+                caption = weight.caption,
+                accent = Palette.accent,
                 spark = emptyList(),
                 sparkColor = Palette.accent,
             )
         },
         { m ->
+            // On-device APPROXIMATE whole-day active+resting energy from HR alone (DailyMetric
+            // .activeKcalEst). A heart-rate estimate, not cloud/clinical parity — shown rounded. (#107)
             SparkStatTile(
                 modifier = m,
                 label = "Calories",
-                value = NO_DATA,
-                caption = "not connected",
-                accent = Palette.textTertiary,
+                value = d?.activeKcalEst?.let { "${intString(it)} kcal" } ?: NO_DATA,
+                caption = d?.activeKcalEst?.let { "active · est." },
+                accent = d?.activeKcalEst?.let { Palette.metricAmber } ?: Palette.textTertiary,
                 spark = emptyList(),
                 sparkColor = Palette.metricAmber,
             )
@@ -785,6 +817,44 @@ private fun sleepValue(d: DailyMetric?): String {
     val m = d?.totalSleepMin ?: return NO_DATA
     val total = m.roundToInt()
     return "${total / 60}h ${total % 60}m"
+}
+
+// MARK: - Steps / Weight / Calories tile logic (issue #107)
+//
+// Steps and Calories read straight off today's DailyMetric (the on-device WHOOP5 derivations); the
+// pure helpers below back the Weight tile, which has no daily strap source and instead falls back to
+// the user's profile weight. Kept pure + file-internal so TodayMetricTilesTest is the oracle.
+
+/** The Weight tile's display string and an honest caption ("from profile" only on fallback). */
+internal data class WeightTileText(val value: String, val caption: String?)
+
+/**
+ * The newest body weight across the two Apple-side sources (apple-health + health-connect), or null
+ * when neither carries one. Days are ISO `yyyy-MM-dd`, which sorts chronologically, so the lexically
+ * greatest day with a non-null `weightKg` is the most recent — no date parsing needed. (#107)
+ */
+internal fun latestWeightKg(apple: List<AppleDaily>, healthConnect: List<AppleDaily>): Double? =
+    (apple + healthConnect)
+        .filter { it.weightKg != null }
+        .maxByOrNull { it.day }
+        ?.weightKg
+
+/**
+ * Resolve the Weight tile text: prefer the latest Apple/Health-Connect weight, else fall back to the
+ * SI profile weight with a "from profile" caption so the source stays honest. Both are formatted
+ * through the shared [UnitFormatter] so the Imperial/Metric toggle reaches this tile too. (#107)
+ */
+internal fun weightTile(latestWeightKg: Double?, profileWeightKg: Double, system: UnitSystem): WeightTileText =
+    if (latestWeightKg != null) {
+        WeightTileText(UnitFormatter.massFromKilograms(latestWeightKg, system), "latest")
+    } else {
+        WeightTileText(UnitFormatter.massFromKilograms(profileWeightKg, system), "from profile")
+    }
+
+/** Group-separated integer display from a Double (e.g. 12 345 steps), matching the Apple Health tiles. */
+private fun intString(v: Double): String {
+    val n = v.roundToInt()
+    return if (kotlin.math.abs(n) >= 1000) String.format(Locale.US, "%,d", n) else "$n"
 }
 
 private const val NO_DATA = "No Data"
