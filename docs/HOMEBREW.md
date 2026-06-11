@@ -4,12 +4,22 @@ macOS users install + auto-update NOOP with:
 
 ```bash
 brew tap noopapp/noop
+brew trust noopapp/noop    # required since Homebrew 6.0.0 (see note below)
 brew install --cask noop
 brew upgrade --cask noop   # later updates
 ```
 
 The cask lives in the **`NoopApp/homebrew-noop`** tap and points at the macOS `.zip` attached to each
 GitHub Release.
+
+> **Why `brew trust`?** Since **Homebrew 6.0.0** (June 2026), non-official taps must be explicitly
+> trusted before Homebrew will load their code — otherwise you'll see
+> `Error: Refusing to load cask noopapp/noop/noop from untrusted tap`. Trust is a one-time,
+> per-machine decision (publishers can't pre-trust their own tap — only Homebrew's official taps are
+> trusted by default). Trust the whole tap with `brew trust noopapp/noop`, or just our cask with
+> `brew trust --cask noopapp/noop/noop`. It's the Homebrew equivalent of the Gatekeeper
+> right-click-Open below: you're vouching for code you can read — the cask is one short file in the
+> public tap, and the app's full source is in this repo.
 
 > **Unsigned-app note.** NOOP ships anonymously with no Apple Developer ID, so it isn't notarized.
 > Homebrew can't strip the quarantine flag for an un-notarized app, so on **first launch** Gatekeeper

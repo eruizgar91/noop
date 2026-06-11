@@ -5,8 +5,9 @@
 # Run this as the last step of cutting a macOS release (after the release zip is built and
 # uploaded). It computes the zip's SHA256, regenerates Casks/noop.rb in NoopApp/homebrew-noop,
 # and pushes it — so `brew upgrade --cask noop` picks up the new version. Users install/update with:
-#     brew tap noopapp/noop && brew install --cask noop
+#     brew tap noopapp/noop && brew trust noopapp/noop && brew install --cask noop
 #     brew upgrade --cask noop
+# (brew trust is a one-time per-machine step required since Homebrew 6.0.0 for non-official taps.)
 #
 # Anonymity-safe: commits as NoopApp; the token (NoopApp PAT at ~/.config/noop/gh_token) is read
 # from the file and supplied through a transient git credential helper, so it is NEVER placed on a
