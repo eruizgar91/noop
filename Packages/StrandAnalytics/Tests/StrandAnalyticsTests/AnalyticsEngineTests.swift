@@ -128,8 +128,9 @@ final class AnalyticsEngineTests: XCTestCase {
             tSec += rrMs / 1000.0
             rr.append(RRInterval(ts: n.start + Int(tSec), rrMs: Int(rrMs)))
         }
-        // Worn in-bed skin temp at 34 °C across the whole night (raw = °C × 128, Swift scale).
-        let skin = (0..<(n.end - n.start)).map { SkinTempSample(ts: n.start + $0, raw: 4352) }
+        // Worn in-bed skin temp at 34 °C across the whole night (raw = °C × 100, the firmware's
+        // centidegree scale — see SkinTempAnalyticsTests' SCALE NOTE).
+        let skin = (0..<(n.end - n.start)).map { SkinTempSample(ts: n.start + $0, raw: 3400) }
         // Step counter: morning movement after wake, inside the same UTC day → 250 steps.
         let steps = [StepSample(ts: n.end + 600, counter: 100),
                      StepSample(ts: n.end + 1200, counter: 350)]

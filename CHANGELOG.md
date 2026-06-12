@@ -17,6 +17,17 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
+## 2.3.2 — Split sleep: every block counted, one night per day
+
+- **Fixed (Mac and iOS):** on a **Bluetooth-only** setup (no import), a day recorded as multiple sleep
+  blocks showed only one — the rest were silently hidden. All blocks are now read from **both** sources,
+  and a split day reads as **one night**: totals summed, the real gap between blocks preserved in the
+  hypnogram, the "N nights ago" label counting days (not blocks), and a cross-midnight night showing its
+  span ("Fri 13 → Sat 14 Jun"). Implemented from [PR #173](https://github.com/NoopApp/noop/pull/173) —
+  thanks **@FrostDev7**. (Android's day totals were already correct; its per-day grouping follows.)
+
+---
+
 ## 2.3.1 — Skin temperature unblocked on Mac/iOS, plus export fixes
 
 All from working through @tigercraft4's PR #97 code review (which deserved a much faster response
