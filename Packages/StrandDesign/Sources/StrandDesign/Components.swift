@@ -14,7 +14,25 @@ public enum NoopMetrics {
     public static let tileHeight: CGFloat = 108  // every metric tile is this tall
     public static let chartHeight: CGFloat = 220
     public static let hypnogramBandMinThickness: CGFloat = 14  // floor so short stages read as bars, not ticks
+    public static let tabBarClearance: CGFloat = 76  // iOS: extra bottom scroll room so the last card clears the floating tab bar
 }
+
+// MARK: - iOS sheet presentation idiom
+
+#if os(iOS)
+public extension View {
+    /// The house iOS sheet idiom: the drag indicator (the touch affordance that says
+    /// "swipe to dismiss") plus detents. macOS sheets are free-floating windows and must
+    /// NOT receive this, so the helper is iOS-only and call sites stay shared via #if.
+    /// `largeFirst == false` opens at .medium with .large reachable by dragging up (short
+    /// forms); `true` opens full-height (long scrolls).
+    func noopSheetPresentation(largeFirst: Bool) -> some View {
+        self
+            .presentationDragIndicator(.visible)
+            .presentationDetents(largeFirst ? [.large] : [.medium, .large])
+    }
+}
+#endif
 
 // MARK: - Surface
 
@@ -256,7 +274,11 @@ public struct SegmentedPillControl<T: Hashable>: View {
         HStack(spacing: 4) {
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                 let sel = item == selection
-                Button { withAnimation(StrandMotion.interactive) { selection = item } } label: {
+                Button {
+                    guard selection != item else { return }   // re-tapping the active segment stays silent
+                    StrandHaptic.selection.play()
+                    withAnimation(StrandMotion.interactive) { selection = item }
+                } label: {
                     Text(label(item))
                         .font(StrandFont.captionNumber)
                         .foregroundStyle(sel ? StrandPalette.surfaceBase : StrandPalette.textSecondary)
@@ -297,5 +319,40 @@ public struct SourceBadge: View {
             .background(tint.opacity(0.16), in: Capsule(style: .continuous))
             .foregroundStyle(tint)
             .overlay(Capsule(style: .continuous).strokeBorder(tint.opacity(0.34), lineWidth: 1))
+    }
+}
+
+// MARK: - Numeric field helpers (iOS soft-keyboard)
+
+public extension View {
+    /// Configures a TextField for whole-number-or-decimal entry on iOS: the decimal-pad
+    /// keyboard (handles both integer Avg-HR and decimal calories). No-op on macOS
+    /// (hardware keyboard), so the SAME shared view compiles on both. Pair with
+    /// `.keyboardDoneToolbar(...)` on the enclosing view to add a Done button (the decimal
+    /// pad has no return key).
+    func numericKeyboard() -> some View {
+        #if os(iOS)
+        self.keyboardType(.decimalPad).textContentType(nil)
+        #else
+        self
+        #endif
+    }
+
+    /// Adds a single trailing "Done" button to the software-keyboard accessory bar that
+    /// resigns the given focus binding. iOS-only; the keyboard toolbar is hosted by the
+    /// keyboard itself, so it works inside a sheet with no NavigationStack. No-op on macOS.
+    func keyboardDoneToolbar<Value: Hashable>(_ focus: FocusState<Value?>.Binding) -> some View {
+        #if os(iOS)
+        self.toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Done") { focus.wrappedValue = nil }
+                    .font(StrandFont.body)
+                    .foregroundStyle(StrandPalette.accent)
+            }
+        }
+        #else
+        self
+        #endif
     }
 }

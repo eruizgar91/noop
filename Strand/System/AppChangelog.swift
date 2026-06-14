@@ -7,7 +7,7 @@ enum AppChangelog {
 
     /// Bump this when you add a release below. The "What's New" sheet shows automatically when the
     /// stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
-    static let currentVersion = "2.16.1"
+    static let currentVersion = "2.17.0"
 
     struct Release: Identifiable {
         let version: String
@@ -19,6 +19,15 @@ enum AppChangelog {
 
     /// Newest first.
     static let releases: [Release] = [
+        Release(
+            version: "2.17.0",
+            title: "iPhone polish + accessibility",
+            date: "June 2026",
+            items: [
+                "iPhone: the floating tab bar no longer hides the last card on scrolling screens — there's now room to scroll the final card fully clear. Thanks @vulnix0x4 (#333).",
+                "iPhone: tappable cards now give a subtle press response + a light haptic (before, they only reacted to a mouse pointer), and the manual-workout sheet uses a proper drag-handle + a decimal keypad with a Done button. Thanks @vulnix0x4 (#329, #330).",
+                "Accessibility: charts now read a one-line VoiceOver summary (e.g. \"Charge trend — 35 points, mean 62, range 22 to 91\"), and the gauge draw-in animation respects Reduce Motion. Thanks @vulnix0x4 (#334).",
+            ]),
         Release(
             version: "2.16.1",
             title: "Today tiles no longer truncate their value (Android)",

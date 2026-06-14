@@ -187,7 +187,16 @@ struct MetricExplorerView: View {
                                         MetricRow(metric: metric,
                                                   isEmpty: emptyByID[metric.id] ?? false)
                                     }
-                                    .buttonStyle(.plain)
+                                    // Full-row press-down feedback (square corners — the row spans the
+                                    // card edge-to-edge, dividers between).
+                                    .buttonStyle(StrandPressableButtonStyle(cornerRadius: 0))
+                                    #if os(iOS)
+                                    // Light selection tick on tap; the simultaneousGesture leaves the
+                                    // NavigationLink push intact.
+                                    .simultaneousGesture(TapGesture().onEnded {
+                                        StrandHaptic.selection.play()
+                                    })
+                                    #endif
                                     if idx < metrics.count - 1 {
                                         Divider().overlay(StrandPalette.hairline)
                                             .padding(.leading, 56)

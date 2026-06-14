@@ -17,6 +17,14 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
+## 2.17.0 — iPhone polish + accessibility
+
+- **iPhone:** the floating tab bar no longer hides the last card on scrolling screens. Thanks @vulnix0x4 (#333).
+- **iPhone:** tappable cards give a subtle press response + light haptic, and the manual-workout sheet has a drag-handle + decimal keypad with Done. Thanks @vulnix0x4 (#329, #330).
+- **Accessibility:** charts read a one-line VoiceOver summary, and the gauge draw-in respects Reduce Motion. Thanks @vulnix0x4 (#334).
+
+---
+
 ## 2.16.1 — Today tiles no longer truncate their value (Android)
 
 - **Fixed (Android):** some Today tiles cut their value off to "…" (Effort, Rest, Respiratory, and the

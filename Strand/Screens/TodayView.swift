@@ -271,10 +271,15 @@ struct TodayView: View {
             // The whole card is tappable as the primary action; the ✕ stops the tap from also firing.
             .contentShape(Rectangle())
             .onTapGesture {
+                #if os(iOS)
+                StrandHaptic.selection.play()
+                #endif
                 scoringGuideCardSeen = true
                 showGuideTop = true
             }
         }
+        // Press-down feedback for the tappable card surface.
+        .strandPressable()
     }
 
     #if os(iOS)
@@ -284,7 +289,10 @@ struct TodayView: View {
     /// target; reuses the heart.fill + metricRose styling and the accessibility copy of the macOS
     /// toolbar button so both platforms read identically. iOS-only — macOS keeps the toolbar item.
     private var supportRow: some View {
-        Button { showingSupport = true } label: {
+        Button {
+            StrandHaptic.selection.play()
+            showingSupport = true
+        } label: {
             NoopCard {
                 HStack(spacing: 14) {
                     Image(systemName: "heart.fill")
@@ -308,7 +316,8 @@ struct TodayView: View {
                 }
             }
         }
-        .buttonStyle(.plain)
+        // Press-down feedback for the full-card button surface.
+        .buttonStyle(StrandPressableButtonStyle())
         .accessibilityLabel("Support NOOP — donate or get in touch")
     }
     #endif
