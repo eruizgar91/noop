@@ -567,6 +567,25 @@ class WhoopBleClient(
             return newest
         }
 
+        /** OLDEST plausible record timestamp in a GET_DATA_RANGE frame — the start of the strap's stored
+         *  history. Same scan as [dataRangeNewestUnix] but keeps the minimum, so one connect can report the
+         *  full banked SPAN (oldest…newest) = the backlog DEPTH a deep oldest-first drain must cover before
+         *  recent nights land (#364). Mirrors Swift `BLEManager.dataRangeOldestUnix`. */
+        fun dataRangeOldestUnix(frame: ByteArray): Long? {
+            if (frame.size <= 7) return null
+            var oldest: Long? = null
+            var i = 7
+            while (i + 4 <= frame.size) {
+                val w = (frame[i].toLong() and 0xFFL) or
+                    ((frame[i + 1].toLong() and 0xFFL) shl 8) or
+                    ((frame[i + 2].toLong() and 0xFFL) shl 16) or
+                    ((frame[i + 3].toLong() and 0xFFL) shl 24)
+                if (w in 1_700_000_000L..1_900_000_000L) oldest = minOf(oldest ?: Long.MAX_VALUE, w)
+                i += 4
+            }
+            return oldest
+        }
+
         /** #364 auto-continue cap: consecutive immediate re-kicks per connection before falling back to
          *  the 900s periodic timer. 6 × ~60s ≈ 6 min of back-to-back draining without letting a
          *  misbehaving strap monopolise Bluetooth. Mirrors Swift BackfillContinuation.defaultMaxAutoContinues. */
@@ -2018,6 +2037,15 @@ class WhoopBleClient(
                             // a genuinely un-banked night (newest is older) — mirrors the Swift line.
                             val fmt = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US)
                             log("Strap newest banked record: ${fmt.format(java.util.Date(it * 1000L))} (from data range)")
+                            // Also surface the OLDEST banked record → the full backlog SPAN, i.e. the depth a
+                            // deep oldest-first drain must cover before recent nights land (#364). Mirrors Swift.
+                            dataRangeOldestUnix(frame)?.let { oldest ->
+                                if (oldest < it) {
+                                    val spanDays = (it - oldest) / 86_400L
+                                    log("Strap banked history span: ${fmt.format(java.util.Date(oldest * 1000L))} → newest " +
+                                        "(~$spanDays day${if (spanDays == 1L) "" else "s"} of backlog, drained oldest-first)")
+                                }
+                            }
                         }
                     }
 

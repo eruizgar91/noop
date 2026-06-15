@@ -2261,6 +2261,22 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         return newest
     }
 
+    /// The OLDEST plausible record timestamp in a GET_DATA_RANGE frame — the start of the strap's stored
+    /// history. Same scan as `dataRangeNewestUnix` but keeps the minimum, so one connect can report the
+    /// full banked SPAN (oldest…newest). For the recurring "last night didn't sync" reports (#364) that
+    /// span is the backlog DEPTH at a glance: a strap that banked weeks of un-synced history has a wide
+    /// span and simply needs time to drain oldest-first, vs. a narrow span that should clear quickly.
+    static func dataRangeOldestUnix(from frame: [UInt8]) -> Int? {
+        guard frame.count > 7 else { return nil }
+        let body = Array(frame[7...]); var oldest: Int? = nil; var i = 0
+        while i + 4 <= body.count {
+            let w = Int(body[i]) | Int(body[i+1]) << 8 | Int(body[i+2]) << 16 | Int(body[i+3]) << 24
+            if w >= 1_700_000_000 && w <= 1_900_000_000 { oldest = min(oldest ?? .max, w) }
+            i += 4
+        }
+        return oldest
+    }
+
     public func peripheral(_ peripheral: CBPeripheral,
                            didUpdateValueFor characteristic: CBCharacteristic,
                            error: Error?) {
@@ -2316,6 +2332,12 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                     let d = ISO8601DateFormatter()
                     d.formatOptions = [.withFullDate, .withTime, .withColonSeparatorInTime, .withSpaceBetweenDateAndTime]
                     log("Strap newest banked record: \(d.string(from: Date(timeIntervalSince1970: TimeInterval(newest)))) (from data range)")
+                    // Also surface the OLDEST banked record so one connect shows the full backlog SPAN — the
+                    // depth a deep oldest-first drain has to cover before recent nights land (#364).
+                    if let oldest = BLEManager.dataRangeOldestUnix(from: frame), oldest < newest {
+                        let spanDays = (newest - oldest) / 86_400
+                        log("Strap banked history span: \(d.string(from: Date(timeIntervalSince1970: TimeInterval(oldest)))) → newest (~\(spanDays) day\(spanDays == 1 ? "" : "s") of backlog, drained oldest-first)")
+                    }
                 }
                 // Clock correlation runs in both live and backfill modes. Once established it
                 // unblocks both the Collector (live path) and the Backfiller (chunk decoding).
