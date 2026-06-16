@@ -55,6 +55,8 @@ struct SettingsView: View {
     // Alternate app icon (iOS only) — false = Titanium (primary AppIcon), true = Blue Titanium
     // ("AppIcon-Navy"). Display-only preference; the live switch goes through setAlternateIconName.
     @AppStorage("appIcon.alt") private var useNavyIcon = false
+    // Light/Dark/System theme. Read by both app roots' .preferredColorScheme; default follows the OS.
+    @AppStorage(AppearanceMode.storageKey) private var appearanceRaw = AppearanceMode.system.rawValue
 
     /// The strap model the user last picked (same key the scan pickers write). Gates the WHOOP 4.0-only
     /// rename control in the strap card — renaming uses the Harvard command set, which a 5/MG doesn't share.
@@ -97,9 +99,7 @@ struct SettingsView: View {
                        subtitle: "Your numbers, your strap, and how NOOP works. All on \(Platform.deviceNounPhrase).") {
             profileCard
             unitsCard
-            #if os(iOS)
             appearanceCard
-            #endif
             strapCard
             experimentalCard
             backupCard
@@ -471,19 +471,30 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Appearance (iOS-only — alternate app icon)
+    // MARK: - Appearance (Theme everywhere; alternate app icon iOS-only)
 
-    #if os(iOS)
-    /// App-icon picker (v3 "Titanium & Gold"). Switches between the primary machined-titanium icon
-    /// and the alternate blued-titanium "AppIcon-Navy" via UIApplication.setAlternateIconName.
-    /// iOS-only: macOS has no alternate-icon API.
+    /// Theme (System / Light / Dark) on every platform, plus the iOS app-icon choice. The Theme picker
+    /// writes `AppearanceMode.storageKey`, which both app roots read via `.preferredColorScheme`; because
+    /// every palette token is a dynamic `Color(light:dark:)`, the whole UI re-resolves on change.
     private var appearanceCard: some View {
         SettingsSection(
-            icon: "app.badge",
+            icon: "circle.lefthalf.filled",
             title: "Appearance",
-            blurb: "Pick the NOOP home-screen icon. Both are finished in titanium — the original machined silver, or a deep blued navy with gold."
+            blurb: "Choose Light, Dark, or follow your system. Light keeps NOOP's gold on warm paper; Dark is the signature navy."
         ) {
             VStack(spacing: 0) {
+                FormRow(label: "Theme") {
+                    Picker("Theme", selection: $appearanceRaw) {
+                        ForEach(AppearanceMode.allCases) { mode in
+                            Text(mode.label).tag(mode.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .fixedSize()
+                    .accessibilityLabel("Theme")
+                }
+                #if os(iOS)
                 FormRow(label: "App icon") {
                     Picker("App icon", selection: $useNavyIcon) {
                         Text("Titanium").tag(false)
@@ -495,10 +506,12 @@ struct SettingsView: View {
                     .accessibilityLabel("App icon")
                     .onChangeCompat(of: useNavyIcon) { applyAppIcon($0) }
                 }
+                #endif
             }
         }
     }
 
+    #if os(iOS)
     /// Apply the alternate-icon choice. Runs on the main actor (UIKit requirement) and tolerates the
     /// no-op cases (already-set, unsupported); on failure it surfaces the error and reverts the toggle
     /// so the control never disagrees with what's actually on the Home Screen.

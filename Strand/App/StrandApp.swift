@@ -1,4 +1,5 @@
 import SwiftUI
+import StrandDesign
 
 @main
 struct StrandApp: App {
@@ -6,6 +7,8 @@ struct StrandApp: App {
     /// Shared cross-screen navigation hook (e.g. Live → Devices). The macOS shell (`RootView`)
     /// observes it and drives the sidebar selection.
     @StateObject private var router = NavRouter()
+    /// Appearance preference (System/Light/Dark). Default follows the OS; the Settings picker writes it.
+    @AppStorage(AppearanceMode.storageKey) private var appearanceRaw = AppearanceMode.system.rawValue
 
     var body: some Scene {
         WindowGroup {
@@ -19,7 +22,7 @@ struct StrandApp: App {
                 .environmentObject(model.coach)
                 .environmentObject(router)
                 .frame(minWidth: 1000, minHeight: 700)
-                .preferredColorScheme(.dark)
+                .preferredColorScheme(AppearanceMode.resolve(appearanceRaw).colorScheme)
                 // Dynamic Type now scales the prose/label roles (StrandFont). Cap the upper end so the
                 // fixed-geometry tiles/gauges stay legible at the largest accessibility sizes rather than
                 // clipping; the common Larger-Text range still scales fully.

@@ -88,7 +88,6 @@ public struct OnboardingWizard: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(StrandPalette.surfaceBase.ignoresSafeArea())
-        .preferredColorScheme(.dark)
         // Reduce Motion: leave the ambient bloom at its resting frame (no breathing).
         .onAppear { if !reduceMotion { glow = true } }
         // Isolated live observation — a hidden watcher slides Scan → celebration on bond
@@ -1319,7 +1318,6 @@ private struct OnboardingPreview: View {
             .environmentObject(model.live)
             .environmentObject(model.profile)
             .frame(width: 1100, height: 780)
-            .preferredColorScheme(.dark)
     }
 }
 

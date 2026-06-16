@@ -72,6 +72,9 @@ public struct MenuBarContent: View {
     @EnvironmentObject private var repo: Repository
     @EnvironmentObject private var live: LiveState
     @EnvironmentObject private var model: AppModel
+    /// The menu-bar popover is a SEPARATE scene from the main window, so it doesn't inherit the
+    /// window's appearance — drive it from the same setting directly.
+    @AppStorage(AppearanceMode.storageKey) private var appearanceRaw = AppearanceMode.system.rawValue
 
     public init() {}
 
@@ -126,7 +129,7 @@ public struct MenuBarContent: View {
         .padding(16)
         .frame(width: 268)
         .background(StrandPalette.surfaceOverlay)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(AppearanceMode.resolve(appearanceRaw).colorScheme)
     }
 
     // MARK: Header

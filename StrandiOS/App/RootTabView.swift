@@ -57,7 +57,6 @@ struct RootTabView: View {
 
             centreFAB
         }
-        .preferredColorScheme(.dark)
         .task { await repo.refresh() }
         // Quick-action sheet presents with the calm easing (~0.42s) per the README sheet spec —
         // the easing is applied where `quickAction` is set (see `presentQuickAction`), keeping the
@@ -158,7 +157,6 @@ struct RootTabView: View {
                     }
                 }
         }
-        .preferredColorScheme(.dark)
     }
 
     /// The Devices manager wrapped in its own nav stack + Done button (mirrors `quickScreen`, but
@@ -176,7 +174,6 @@ struct RootTabView: View {
                     }
                 }
         }
-        .preferredColorScheme(.dark)
     }
 
     private func tab<V: View>(_ view: V, _ title: LocalizedStringKey, _ icon: String) -> some View {
@@ -299,7 +296,6 @@ private struct QuickActionSheet: View {
                 }
                 .ignoresSafeArea()
         )
-        .preferredColorScheme(.dark)
     }
 
     /// One flat action row: hued line-icon tile + title, inset surface, hairline border.

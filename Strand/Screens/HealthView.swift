@@ -1102,7 +1102,6 @@ struct FitnessAgeDemoScreen: View {
         ScreenScaffold(title: "Health Monitor", subtitle: "Fitness Age", onRefresh: {}) {
             FitnessAgeSection()
         }
-        .preferredColorScheme(.dark)
     }
 }
 
@@ -1112,7 +1111,6 @@ struct VitalityDemoScreen: View {
         ScreenScaffold(title: "Health Monitor", subtitle: "Vitality", onRefresh: {}) {
             VitalitySection()
         }
-        .preferredColorScheme(.dark)
     }
 }
 #endif

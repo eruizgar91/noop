@@ -20,6 +20,8 @@ struct StrandiOSApp: App {
     @StateObject private var router = NavRouter()
     @State private var liveActivity = LiveActivityController()
     @Environment(\.scenePhase) private var scenePhase
+    /// Appearance preference (System/Light/Dark). Default follows the OS; the Settings picker writes it.
+    @AppStorage(AppearanceMode.storageKey) private var appearanceRaw = AppearanceMode.system.rawValue
 
     init() {
         // Debug-only canary: trips if the App Group entitlement is missing on this target before any
@@ -47,7 +49,7 @@ struct StrandiOSApp: App {
                 .environmentObject(model.coach)
                 .environmentObject(health)
                 .environmentObject(router)
-                .preferredColorScheme(.dark)
+                .preferredColorScheme(AppearanceMode.resolve(appearanceRaw).colorScheme)
                 // Dynamic Type now scales the prose/label roles (StrandFont). Cap the upper end so the
                 // fixed-geometry tiles/gauges stay legible at the largest accessibility sizes rather than
                 // clipping; the common Larger-Text range still scales fully.
