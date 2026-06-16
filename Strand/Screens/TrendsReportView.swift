@@ -468,7 +468,13 @@ struct TrendsReportSheet: View {
         let name = "NOOP-trends-\(report.start)_to_\(report.end).pdf"
         TrendsReportRenderer.exportPDF(page: page(for: report), suggestedName: name)
         exporting = false
+        #if os(macOS)
+        // macOS NSSavePanel is modal and has already returned by now, so closing the report sheet is fine.
         dismiss()
+        #endif
+        // iOS (#455): do NOT dismiss here. The share sheet is presented ON TOP of this report sheet; calling
+        // dismiss() would tear this sheet — and the share sheet with it — straight back down, so the user
+        // saw nothing. Leave the report up; the share sheet sits over it and returns here when closed.
     }
 }
 

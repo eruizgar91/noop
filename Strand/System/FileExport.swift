@@ -72,6 +72,13 @@ enum FileExport {
                 .connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
               let root = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController
                 ?? scene.windows.first?.rootViewController else { return }
+        // Present from the TOP-MOST controller, not the root (#455). When the caller is itself inside a
+        // SwiftUI sheet — e.g. the Trends report is shown via `.sheet` — root already has that sheet
+        // presented, so `root.present(...)` is a no-op ("already presenting…") and the share sheet never
+        // appears. Climb the presentedViewController chain so the share sheet stacks on top of whatever's
+        // up. (The Share-strap-log path worked only because Settings isn't a sheet — root had nothing on it.)
+        var presenter = root
+        while let next = presenter.presentedViewController, !next.isBeingDismissed { presenter = next }
         let vc = UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
         if !cleanup.isEmpty {
             vc.completionWithItemsHandler = { _, _, _, _ in
@@ -83,11 +90,11 @@ enum FileExport {
         }
         // iPad: anchor the popover to the screen centre to avoid a crash.
         if let pop = vc.popoverPresentationController {
-            pop.sourceView = root.view
-            pop.sourceRect = CGRect(x: root.view.bounds.midX, y: root.view.bounds.midY, width: 0, height: 0)
+            pop.sourceView = presenter.view
+            pop.sourceRect = CGRect(x: presenter.view.bounds.midX, y: presenter.view.bounds.midY, width: 0, height: 0)
             pop.permittedArrowDirections = []
         }
-        root.present(vc, animated: true)
+        presenter.present(vc, animated: true)
     }
     #endif
 }

@@ -17,6 +17,10 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
+## 4.2.4 — Trends report export now opens the share sheet on iPhone (iOS fix)
+
+- Fixed the **Export PDF** button on the Trends report doing nothing on iPhone. The report opens in a sheet, but the share sheet was being presented from the wrong place (behind the report that was already on screen), so iOS silently dropped it and the export appeared to fail. NOOP now presents the share sheet from the top-most screen, so it slides up correctly and you can save the PDF to Files, AirDrop it, or send it on. Thanks @subscriptiondestroyer (#455). *(iOS-only fix — the macOS and Android exports were unaffected; they're functionally unchanged in this release.)*
+
 ## 4.2.3 — Deep history backlog drains without manual strap taps (all platforms)
 
 - Fixed a sync stall where a strap that had been fully discharged (or carried a previous owner's history) would offload only one night per connection and then sit idle until you physically tapped the strap to force the next chunk. The cause: such a strap banks records across multiple clock epochs, and the "newest record" the strap reports can latch a stale value (e.g. a 2024 timestamp when your real newest is 2026) — which read as *behind* what NOOP had already saved, so the auto-continue logic wrongly concluded "caught up" and stopped. NOOP now also checks whether the just-finished pass actually handed over real sensor rows: if it did and the strap's trim cursor advanced, the backlog keeps draining in back-to-back passes regardless of a stale "newest" reading. A genuinely caught-up strap still stops (it persists zero new rows), and the per-connection cap still bounds it. Thanks @claypilat for the precise diagnosis (#451) — this also removes the "have to keep re-triggering it" half of #364.

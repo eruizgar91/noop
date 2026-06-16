@@ -7,7 +7,7 @@ enum AppChangelog {
 
     /// Bump this when you add a release below. The "What's New" sheet shows automatically when the
     /// stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
-    static let currentVersion = "4.2.3"
+    static let currentVersion = "4.2.4"
 
     struct Release: Identifiable {
         let version: String
@@ -19,6 +19,13 @@ enum AppChangelog {
 
     /// Newest first.
     static let releases: [Release] = [
+        Release(
+            version: "4.2.4",
+            title: "Trends report export now opens the share sheet (iPhone)",
+            date: "June 2026",
+            items: [
+                "**Fixed the Trends report \"Export PDF\" doing nothing on iPhone.** The report opens in a sheet, but the share sheet was being presented behind it, so iOS silently dropped it. It now appears correctly — save the PDF to Files, AirDrop it, or send it on. Thanks @subscriptiondestroyer (#455). *(iPhone-only fix; the Mac and Android exports already worked.)*",
+            ]),
         Release(
             version: "4.2.3",
             title: "Deep history backlog drains without manual taps",
