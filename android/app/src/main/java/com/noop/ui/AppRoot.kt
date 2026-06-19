@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -29,7 +28,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.CompareArrows
 import androidx.compose.material.icons.automirrored.filled.ShowChart
 import androidx.compose.material.icons.automirrored.filled.TrendingUp
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Air
 import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.AutoAwesome
@@ -196,7 +194,7 @@ private val drawerGroups: List<DrawerGroup> = listOf(
 )
 
 /**
- * App shell: a unified [GlassBottomBar] (Today · Trends · [add] · Sleep · More) and a
+ * App shell: a unified [GlassBottomBar] (Today · Trends · Sleep · More) and a
  * [ModalNavigationDrawer] (hamburger in a [TopAppBar] titled with the current screen),
  * both driving one [NavHost]. A single [AppViewModel] is created here and shared with
  * every screen, so the BLE connection and cached metrics stay app-wide singletons.
@@ -331,17 +329,17 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
                 )
             },
             bottomBar = {
-                // One unified "glass" bar: Today · Trends · [add] · Sleep · More. The add button is a
-                // small CONTAINED gold disc inline in the middle slot — not a big floating FAB, no
-                // overlap, no glow (matches the iOS FloatingTabBar refresh). The drawer stays (same
-                // destinations, grouped) so nothing moved for existing users; the bar is additive.
+                // One unified "glass" bar: four evenly-spaced tabs — Today · Trends · Sleep · More
+                // (matches the iOS FloatingTabBar refresh). The quick-action "+" moved off the bar
+                // into the Today header's top-right (balancing the avatar), so the bar is clean tabs
+                // only. The drawer stays (same destinations, grouped) so nothing moved for existing
+                // users; the bar is additive.
                 GlassBottomBar(
                     current = current,
                     onTabSelected = { dest ->
                         if (dest.route != currentRoute) nav.navigateTopLevel(dest.route)
                     },
                     onMore = { showMoreSheet = true },
-                    onAdd = { showQuickActions = true },
                 )
             },
         ) { inner ->
@@ -364,6 +362,9 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
                     TodayScreen(
                         viewModel = viewModel,
                         onSupport = { nav.navigateTopLevel(Destination.Support.route) },
+                        // The quick-action "+" lives in the Today header's top-right now (off the
+                        // bottom bar) — it opens the same quick-action sheet the bar used to.
+                        onQuickActions = { showQuickActions = true },
                     )
                 }
                 composable(Destination.Live.route) {
@@ -538,18 +539,18 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
 
 // MARK: - Glass bottom bar
 //
-// The signature bar, ported from iOS's FloatingTabBar: ONE rounded "glass" island holding five
-// inline slots — Today · Trends · [add] · Sleep · More. The add button is a small contained gold
-// disc that sits in the middle slot (no floating FAB, no overlap, no glow). The "glass" feel is a
-// translucent raised surface with a low elevation and a subtle hairline border — frosted, not a hard
-// opaque slab and not a glow. Each nav slot is an icon over a small label; active = gold accent,
-// inactive = textSecondary. All routing is unchanged: the four tabs switch the same destinations and
-// the add button opens the existing quick-action sheet.
+// The signature bar, ported from iOS's FloatingTabBar: ONE rounded "glass" island holding four
+// evenly-spaced inline slots — Today · Trends · Sleep · More. The quick-action "+" now lives in the
+// Today header's top-right (it left the bar to balance the avatar), so the bar is clean tabs only.
+// The "glass" feel is a translucent raised surface with a low elevation and a subtle hairline border
+// — frosted, not a hard opaque slab and not a glow. Each nav slot is an icon over a small label;
+// active = gold accent, inactive = textSecondary. All routing is unchanged: the four tabs switch the
+// same destinations.
 
 /** A single bottom-bar nav slot: the destination it switches to, plus the bar-specific icon/label. */
 private data class BarTab(val dest: Destination, val icon: ImageVector, val label: String)
 
-/** The four nav slots flanking the centre add disc, in iOS order: Today · Trends · [add] · Sleep · More.
+/** The nav slots in iOS order: Today · Trends · Sleep · More.
  *  More is special-cased (it opens the sheet rather than a route), so it is appended at the call site. */
 private val barLeadingTabs = listOf(
     BarTab(Destination.Today, Icons.Outlined.GridView, "Today"),
@@ -564,7 +565,6 @@ private fun GlassBottomBar(
     current: Destination,
     onTabSelected: (Destination) -> Unit,
     onMore: () -> Unit,
-    onAdd: () -> Unit,
 ) {
     val barShape = RoundedCornerShape(50)
     Box(
@@ -602,7 +602,6 @@ private fun GlassBottomBar(
                         onClick = { onTabSelected(tab.dest) },
                     )
                 }
-                AddDisc(modifier = Modifier.weight(1f), onClick = onAdd)
                 barTrailingTabs.forEach { tab ->
                     BarSlot(
                         icon = tab.icon,
@@ -660,35 +659,6 @@ private fun BarSlot(
             ),
             color = tint,
         )
-    }
-}
-
-/** The small CONTAINED gold quick-action disc that sits inline in the middle slot — the same gold
- *  language as the old FAB, differentiated, but ~38dp and not hogging the bar (no float, no glow). */
-@Composable
-private fun AddDisc(modifier: Modifier = Modifier, onClick: () -> Unit) {
-    Box(modifier = modifier, contentAlignment = Alignment.Center) {
-        Box(
-            modifier = Modifier
-                .size(38.dp)
-                .clip(CircleShape)
-                .background(Brush.linearGradient(*Palette.goldGradient.toTypedArray()))
-                .border(0.5.dp, Palette.goldLight.copy(alpha = 0.5f), CircleShape)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onClick,
-                )
-                .semantics { contentDescription = "Quick actions" },
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                Icons.Filled.Add,
-                contentDescription = null,
-                tint = Palette.goldDeepText,
-                modifier = Modifier.size(20.dp),
-            )
-        }
     }
 }
 

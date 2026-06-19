@@ -4,6 +4,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -25,6 +26,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Air
 import androidx.compose.material.icons.filled.Battery5Bar
 import androidx.compose.material.icons.filled.Bedtime
@@ -64,6 +66,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.PathEffect
@@ -108,7 +111,11 @@ import kotlin.math.roundToInt
  * "No Data" states instead of raw dashes, so old imports do not look like today.
  */
 @Composable
-fun TodayScreen(viewModel: AppViewModel, onSupport: () -> Unit = {}) {
+fun TodayScreen(
+    viewModel: AppViewModel,
+    onSupport: () -> Unit = {},
+    onQuickActions: () -> Unit = {},
+) {
     val today by viewModel.today.collectAsStateWithLifecycle()
     val alert by viewModel.healthAlert.collectAsStateWithLifecycle()
     val days by viewModel.recentDays.collectAsStateWithLifecycle()
@@ -322,15 +329,23 @@ fun TodayScreen(viewModel: AppViewModel, onSupport: () -> Unit = {}) {
         title = "Control Center",
         subtitle = "Your day, read in full",
         trailing = {
-            // Support heart in the compact top bar (the WHOOP-style redesign moved it off the old
-            // "At a glance" hero header). The donation entry point — keep it discoverable.
-            IconButton(onClick = onSupport, modifier = Modifier.size(Metrics.iconButton)) {
-                Icon(
-                    Icons.Filled.Favorite,
-                    contentDescription = "Support NOOP",
-                    tint = Palette.metricRose,
-                    modifier = Modifier.size(Metrics.iconSmall),
-                )
+            // Compact top bar, trailing edge: the Support heart + the gold quick-action "+".
+            // The "+" moved here from the bottom bar (which is now four clean tabs) so it balances
+            // the header's leading title and stays one tap from the quick-action sheet — mirroring
+            // the iOS Today header where the gold "+" sits trailing after the strap battery.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // Support heart in the compact top bar (the WHOOP-style redesign moved it off the old
+                // "At a glance" hero header). The donation entry point — keep it discoverable.
+                IconButton(onClick = onSupport, modifier = Modifier.size(Metrics.iconButton)) {
+                    Icon(
+                        Icons.Filled.Favorite,
+                        contentDescription = "Support NOOP",
+                        tint = Palette.metricRose,
+                        modifier = Modifier.size(Metrics.iconSmall),
+                    )
+                }
+                Spacer(Modifier.width(Metrics.space8))
+                QuickActionDisc(onClick = onQuickActions)
             }
         },
     ) {
@@ -541,6 +556,37 @@ fun TodayScreen(viewModel: AppViewModel, onSupport: () -> Unit = {}) {
                 enabledKeyMetrics = metrics
                 showMetricsEditor = false
             },
+        )
+    }
+}
+
+/**
+ * The gold quick-action "+" in the Today header's top-right. Moved off the bottom bar (now four clean
+ * tabs) to balance the header and open the existing quick-action sheet. A small CONTAINED gold disc —
+ * the same gold language as the old bottom-bar disc, ~34dp, no float and no glow: just the gold
+ * gradient fill with a hairline rim, the "+" glyph in the gold-deep readout colour.
+ */
+@Composable
+private fun QuickActionDisc(onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(34.dp)
+            .clip(CircleShape)
+            .background(Brush.linearGradient(*Palette.goldGradient.toTypedArray()))
+            .border(0.5.dp, Palette.goldLight.copy(alpha = 0.5f), CircleShape)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            )
+            .semantics { contentDescription = "Quick actions" },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            Icons.Filled.Add,
+            contentDescription = null,
+            tint = Palette.goldDeepText,
+            modifier = Modifier.size(18.dp),
         )
     }
 }
