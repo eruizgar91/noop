@@ -289,9 +289,10 @@ fun SettingsScreen(vm: AppViewModel) {
     // "How your scores work" explainer sheet, reachable any time from About (macOS/iOS parity).
     var showScoringGuide by remember { mutableStateOf(false) }
 
-    // "Recalibrate HRV baseline" confirm dialog (Charge advanced). Writes the noop.hrvBaselineEpoch
-    // pref = now-seconds so foldHistory re-seeds the Charge baseline from tonight onward; the standing
-    // analyze loop picks it up on its next pass. Fixes a baseline that anchored too high on early nights.
+    // "Recalibrate Charge baseline" confirm dialog (Charge advanced). Writes now-seconds to BOTH the
+    // noop.hrvBaselineEpoch and noop.recoveryBaselineEpoch prefs so foldHistory re-seeds every baseline
+    // that feeds Charge from tonight onward; the standing analyze loop picks it up on its next pass.
+    // Fixes a baseline poisoned by a bad first week (worn sick, or early nights that anchored too high).
     var showRecalibrateConfirm by remember { mutableStateOf(false) }
 
     // Steps-estimate calibration screen (WHOOP 4.0), reached from the Profile card's "Steps estimate"
@@ -1475,21 +1476,22 @@ fun SettingsScreen(vm: AppViewModel) {
         }
 
         // --- Charge (Recovery) advanced ---
-        // A manual reset for the personal Charge HRV baseline. If your first few nights read high
-        // (a common cold-start artefact), the baseline can anchor too high and hold your Charge low
-        // for a couple of weeks while the rolling average catches up. Recalibrate re-learns it from
-        // tonight onward. Writes noop.hrvBaselineEpoch = now-seconds; foldHistory drops every night
-        // before that epoch and re-seeds. Mirrors the iOS/Mac Settings recalibrate button.
+        // A manual reset for the personal Charge baseline. If a bad first week poisons it — worn while
+        // sick, or the first few nights read high (a common cold-start artefact) — the baseline anchors
+        // off and holds your Charge wrong for a couple of weeks while the rolling average catches up.
+        // Recalibrate re-learns it from tonight onward. Writes now-seconds to BOTH noop.hrvBaselineEpoch
+        // and noop.recoveryBaselineEpoch (so HRV plus resting HR / respiration / skin temp re-anchor);
+        // foldHistory drops every night before that epoch and re-seeds. Mirrors the iOS/Mac button.
         SettingsSection(
             icon = Icons.Filled.Favorite,
             title = "Charge",
-            blurb = "Charge is NOOP's daily readiness score, learned from your own HRV and resting heart rate over time.",
+            blurb = "Charge is NOOP's daily readiness score, learned from your own HRV, resting heart rate and more over time. Your history stays.",
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text("Recalibrate Charge baseline", style = NoopType.subhead, color = Palette.textPrimary)
                     Text(
-                        "Re-learns your Charge baseline from tonight onward — use if an early reading anchored it too high.",
+                        "Restarts the roughly 4-night build-up for Charge and your HRV baseline from tonight. Use it if a bad first week set your baseline off. Your history stays.",
                         style = NoopType.footnote,
                         color = Palette.textTertiary,
                     )
@@ -1511,7 +1513,7 @@ fun SettingsScreen(vm: AppViewModel) {
                 title = { Text("Recalibrate your Charge baseline?", style = NoopType.title2, color = Palette.textPrimary) },
                 text = {
                     Text(
-                        "NOOP will re-learn your Charge baseline from tonight onward. Earlier nights are ignored, so a baseline that anchored too high resets. Your history isn't deleted — only how the baseline is calculated changes. It takes a few nights to settle.",
+                        "This restarts the roughly 4-night build-up for Charge and your HRV baseline. Your history stays. Use it if a bad first week, like wearing it while sick, set your baseline off.",
                         style = NoopType.subhead,
                         color = Palette.textSecondary,
                     )
@@ -1519,15 +1521,16 @@ fun SettingsScreen(vm: AppViewModel) {
                 confirmButton = {
                     TextButton(
                         onClick = {
-                            // Write now-seconds to the shared epoch key (EXACT same key the iOS/Mac
-                            // button + Baselines.foldHistory use). Stored as whole epoch SECONDS in a
-                            // Long (SharedPreferences has no putDouble; the reader does getLong→toDouble),
-                            // matching the "epoch SECONDS" the key documents. Inline edit() like the
-                            // Rhythm toggle above — this screen doesn't own a ViewModel setter for it.
+                            // Re-anchor EVERY baseline that feeds Charge — HRV plus resting HR /
+                            // respiration / skin temp — by writing now-seconds to BOTH shared epoch keys
+                            // (the EXACT same keys the iOS/Mac button + Baselines.foldHistory use), via
+                            // the single cross-platform source of truth. Stored as whole epoch SECONDS in
+                            // a Long (SharedPreferences has no putDouble; the readers do getLong→toDouble),
+                            // matching the "epoch SECONDS" the keys document. No stored day is deleted.
                             val nowSeconds = System.currentTimeMillis() / 1000L
-                            NoopPrefs.of(context).edit()
-                                .putLong(Baselines.hrvBaselineEpochKey, nowSeconds)
-                                .apply()
+                            val editor = NoopPrefs.of(context).edit()
+                            Baselines.recalibrateRecoveryBaselines(editor, nowSeconds)
+                            editor.apply()
                             showRecalibrateConfirm = false
                             // Nudge an immediate re-analyze so the change is felt now; the standing
                             // 15-min analyze loop also re-runs foldHistory regardless. No-ops cleanly
@@ -1535,7 +1538,7 @@ fun SettingsScreen(vm: AppViewModel) {
                             vm.syncNow()
                             Toast.makeText(
                                 context,
-                                "Charge baseline reset. NOOP will re-learn it from tonight — it takes a few nights to settle.",
+                                "Charge baseline reset. NOOP will re-learn it from tonight. Your history stays, and it takes a few nights to settle.",
                                 Toast.LENGTH_LONG,
                             ).show()
                         },

@@ -176,6 +176,10 @@ struct InsightsView: View {
                     // journal card so the two daily-logging surfaces read as one
                     // "log today" block above the derived insights.
                     MindSection()
+                    // Caffeine window (#526) — log an intake + a rough on-device "still active" hint.
+                    // Self-contained (owns its own UserDefaults-backed store); sits in the same
+                    // "log today" block. Opt-in: shows nothing until the user logs an intake.
+                    CaffeineLogCard()
                     experimentSection
                     if behaviours.isEmpty {
                         // No journal yet — explain, without dead-ending on a paid export.

@@ -11,6 +11,17 @@ public enum DataSourceKind: String, Sendable, Codable, Equatable, CaseIterable {
     /// on-device SQLite store (`DataBase/<user_id>/de/<user_id>.db`). Account-free,
     /// fully offline: NOOP reads the file the user already owns.
     case xiaomiBand
+    /// Oura Ring — the user's own Account data export (JSON), imported from the file
+    /// Oura hands them. Sleep periods + daily readiness/activity → daily metrics + sleep
+    /// sessions. Fully offline, no Oura cloud/API.
+    case ouraImport
+    /// Fitbit — the user's own Google Takeout → Fitbit JSON export (per-day sleep /
+    /// resting_heart_rate / steps / heart_rate files). Fully offline, no Fitbit/Google API.
+    case fitbitImport
+    /// Garmin — the user's own Garmin Connect "Export Your Data" (GDPR) wellness JSON/CSV
+    /// (sleep / resting HR / stress / steps). The FIT activity files inside the same ZIP are
+    /// handled by the wave-1 FIT parser; this path does the WELLNESS daily + sleep only.
+    case garminImport
 }
 
 // MARK: - Generic health sample (Apple Health Record sink)
@@ -430,6 +441,167 @@ public struct XiaomiImportResult: Sendable, Equatable {
     public var summary: ImportSummary
 
     public init(days: [XiaomiDailyRow], sleeps: [XiaomiSleepSession], summary: ImportSummary) {
+        self.days = days
+        self.sleeps = sleeps
+        self.summary = summary
+    }
+}
+
+// MARK: - Wearable file-export import (Oura / Fitbit / Garmin own-data exports)
+
+/// Which third-party wearable an export came from. Used to pick the right parser and to
+/// tag every imported row with an honest per-source label (`oura-import` / `fitbit-import` /
+/// `garmin-import`), so the UI never confuses Oura/Fitbit/Garmin data with WHOOP's.
+public enum WearableBrand: String, Sendable, Equatable, CaseIterable {
+    case oura
+    case fitbit
+    case garmin
+
+    /// The per-source partition / provenance id written as the Data Source device id (mirrors
+    /// `"my-whoop"` / `"apple-health"` / `"xiaomi-band"`). Honest: imported, not live.
+    public var sourceId: String {
+        switch self {
+        case .oura:   return "oura-import"
+        case .fitbit: return "fitbit-import"
+        case .garmin: return "garmin-import"
+        }
+    }
+
+    /// Human label for the import summary / Data Source card.
+    public var displayName: String {
+        switch self {
+        case .oura:   return "Oura"
+        case .fitbit: return "Fitbit"
+        case .garmin: return "Garmin"
+        }
+    }
+
+    public var dataSourceKind: DataSourceKind {
+        switch self {
+        case .oura:   return .ouraImport
+        case .fitbit: return .fitbitImport
+        case .garmin: return .garminImport
+        }
+    }
+}
+
+/// One contiguous sleep-stage interval reconstructed from a wearable export's hypnogram, when
+/// the export carried per-segment staging (Fitbit `levels.data`, Garmin `sleepLevels`). Oura's
+/// account export gives stage DURATIONS but not a per-segment timeline, so its sessions carry the
+/// duration breakdown without a stage list — honest: we never synthesize a fake hypnogram.
+public struct WearableSleepStageInterval: Sendable, Equatable {
+    /// Normalized stage name written into the stage JSON: "deep" / "light" / "rem" / "wake".
+    public var stage: String
+    public var start: Date
+    public var end: Date
+
+    public init(stage: String, start: Date, end: Date) {
+        self.stage = stage
+        self.start = start
+        self.end = end
+    }
+}
+
+/// One sleep session imported from a wearable export. Durations are MINUTES (as NOOP's
+/// `DailyMetric` / sleep model use). A field is nil when the export didn't carry it — never
+/// fabricated. `stages` is empty when the export gave only a duration breakdown (Oura).
+public struct WearableSleepSession: Sendable, Equatable {
+    public var start: Date          // bedtime / sleep onset (UTC)
+    public var end: Date            // wake (UTC)
+    public var deepMin: Double?
+    public var lightMin: Double?
+    public var remMin: Double?
+    public var awakeMin: Double?
+    public var totalSleepMin: Double?
+    public var efficiencyPct: Double?
+    public var avgHr: Int?
+    public var lowestHr: Int?       // Oura/Garmin lowest sleeping HR ≈ resting
+    public var avgHrvMs: Double?    // Oura "average_hrv" (rMSSD ms); others nil
+    public var respRateBpm: Double? // Oura "average_breath"; others nil
+    public var sleepScore: Int?     // the brand's OWN score — stored as reference only, never Charge
+    public var stages: [WearableSleepStageInterval]
+
+    public init(
+        start: Date,
+        end: Date,
+        deepMin: Double? = nil,
+        lightMin: Double? = nil,
+        remMin: Double? = nil,
+        awakeMin: Double? = nil,
+        totalSleepMin: Double? = nil,
+        efficiencyPct: Double? = nil,
+        avgHr: Int? = nil,
+        lowestHr: Int? = nil,
+        avgHrvMs: Double? = nil,
+        respRateBpm: Double? = nil,
+        sleepScore: Int? = nil,
+        stages: [WearableSleepStageInterval] = []
+    ) {
+        self.start = start
+        self.end = end
+        self.deepMin = deepMin
+        self.lightMin = lightMin
+        self.remMin = remMin
+        self.awakeMin = awakeMin
+        self.totalSleepMin = totalSleepMin
+        self.efficiencyPct = efficiencyPct
+        self.avgHr = avgHr
+        self.lowestHr = lowestHr
+        self.avgHrvMs = avgHrvMs
+        self.respRateBpm = respRateBpm
+        self.sleepScore = sleepScore
+        self.stages = stages
+    }
+}
+
+/// One calendar day rolled up from a wearable export. `day` is the export's own calendar day
+/// string (`YYYY-MM-DD`). Every metric is optional — a day only carries what the export recorded.
+///
+/// HONEST DATA: `readinessScore` (Oura) is THEIR score, kept for reference only — it is NEVER shown
+/// as NOOP's Charge. NOOP recomputes its own scores downstream from the raw inputs (RHR / HRV /
+/// sleep) that are present, exactly as it does for any imported source.
+public struct WearableDailyRow: Sendable, Equatable {
+    public var day: String
+
+    // Activity
+    public var steps: Int?
+    public var distanceM: Double?
+    public var activeKcal: Double?
+    public var totalKcal: Double?
+
+    // Heart / recovery inputs
+    public var restingHr: Int?
+    public var avgHrvMs: Double?
+    public var skinTempDevC: Double?  // Oura "temperature_deviation" (°C from baseline)
+    public var spo2Pct: Double?
+    public var avgStress: Int?        // Garmin daily average stress (0..100), reference
+
+    // Sleep rollup (mirrors the night's session, for the daily metric)
+    public var totalSleepMin: Double?
+    public var deepMin: Double?
+    public var lightMin: Double?
+    public var remMin: Double?
+    public var awakeMin: Double?
+    public var efficiencyPct: Double?
+
+    // The brand's OWN reference scores — stored under reference keys, never NOOP Charge/Effort/Rest.
+    public var readinessScore: Int?   // Oura daily readiness (reference)
+    public var sleepScore: Int?       // brand sleep score (reference)
+
+    public init(day: String) {
+        self.day = day
+    }
+}
+
+/// Normalized output of parsing a wearable export (Oura / Fitbit / Garmin own-data export).
+public struct WearableImportResult: Sendable, Equatable {
+    public var brand: WearableBrand
+    public var days: [WearableDailyRow]
+    public var sleeps: [WearableSleepSession]
+    public var summary: ImportSummary
+
+    public init(brand: WearableBrand, days: [WearableDailyRow], sleeps: [WearableSleepSession], summary: ImportSummary) {
+        self.brand = brand
         self.days = days
         self.sleeps = sleeps
         self.summary = summary

@@ -195,7 +195,21 @@ object AnalyticsEngine {
         // the caller's local-day key; attribute by the same offset so the bucket and the key agree.
         val matched = allSessions.filter { dayString(it.end, tzOffsetSeconds) == day }
 
-        // ── Daily sleep aggregates (AASM, in-bed weighted) ────────────────────
+        // ── The day's MAIN night (#525) ───────────────────────────────────────
+        // A day can hold an overnight AND a daytime nap (both end on `day`, so both are in `matched`).
+        // The sleep-DURATION figures (total sleep / stage minutes / efficiency / disturbances, hence the
+        // Rest composite, the debt ledger, and the dashboard card) describe the MAIN night — the SAME
+        // block the Sleep tab's hero shows (longest, preferring an overnight-anchored onset). They must
+        // NOT silently sum the nap in, or the "your night" number disagrees across screens (the #525
+        // report). Naps stay their OWN session rows in `sleepSessions`, where the Sleep tab lists and
+        // labels them separately. [SleepStageTotals.mainNightIndex] is the single shared selector so the
+        // analytics rollup and the Sleep tab resolve to the identical block.
+        val mainNight: DetectedSleep? = SleepStageTotals.mainNightIndex(
+            matched.map { SleepStageTotals.NightBlock(it.start, it.end) },
+            tzOffsetSeconds,
+        )?.let { matched[it] }
+
+        // ── Daily sleep aggregates (AASM) over the MAIN night only (#525) ──────
         var deepS = 0.0
         var remS = 0.0
         var lightS = 0.0
@@ -203,19 +217,27 @@ object AnalyticsEngine {
         var inBedS = 0.0
         var effWeighted = 0.0
         var disturbances = 0
-        for (s in matched) {
-            val m = SleepStager.hypnogramMetrics(s)
-            val inBed = (s.end - s.start).toDouble()
-            inBedS += inBed
-            effWeighted += s.efficiency * inBed
-            deepS += m.deepMin * 60.0
-            remS += m.remMin * 60.0
-            lightS += m.lightMin * 60.0
-            tstS += m.tstS
-            disturbances += m.disturbances
+        if (mainNight != null) {
+            val m = SleepStager.hypnogramMetrics(mainNight)
+            val inBed = (mainNight.end - mainNight.start).toDouble()
+            inBedS = inBed
+            effWeighted = mainNight.efficiency * inBed
+            deepS = m.deepMin * 60.0
+            remS = m.remMin * 60.0
+            lightS = m.lightMin * 60.0
+            tstS = m.tstS
+            disturbances = m.disturbances
         }
         val efficiency = if (inBedS > 0) effWeighted / inBedS else 0.0
 
+        // #525 NOTE: the sleep-DURATION figures above are main-night-only (the headline "your night"),
+        // but the physiological aggregates below (resting HR, HRV, respiration) intentionally stay over
+        // ALL matched sessions. This is deliberate, not an oversight: recovery should reflect the body's
+        // best resting physiology for the day, the main overnight dominates these anyway (it is far longer
+        // than any nap and HRV is in-bed-weighted by duration), and narrowing them to the main night would
+        // widen the change's blast radius into the recovery score right at a release boundary for a
+        // negligible shift. The Rest/sleep-quality term is main-night; the recovery physiology is
+        // day-best-resting, night-dominated. Mirrors the Swift note in AnalyticsEngine.swift.
         // Daily resting HR = lowest per-session resting HR across matched sessions.
         val restingHRDaily: Int? = matched.mapNotNull { it.restingHR }.minOrNull()
         // Daily avg HRV = in-bed-weighted mean of per-session avg HRV.

@@ -204,4 +204,77 @@ final class BaselinesTests: XCTestCase {
         XCTAssertEqual(s.nValid, 0)
         XCTAssertEqual(s.status, .calibrating)
     }
+
+    // MARK: - "Recalibrate Charge baseline" reset helper (noop.hrvBaselineEpoch + noop.recoveryBaselineEpoch)
+
+    /// An isolated UserDefaults suite so these tests never touch the real app domain.
+    private func makeDefaults(_ fn: String = #function) -> UserDefaults {
+        let suite = "BaselinesTests.\(fn)"
+        let d = UserDefaults(suiteName: suite)!
+        d.removePersistentDomain(forName: suite)   // start clean
+        return d
+    }
+
+    /// recalibrateRecoveryBaselines must move BOTH the HRV and the recovery epoch to `now` — the whole
+    /// Charge build-up restarts, not just HRV. Before the reset both read 0 (no recalibration).
+    func testRecalibrateMovesBothEpochs() {
+        let d = makeDefaults()
+        XCTAssertEqual(Baselines.hrvBaselineEpoch(d), 0, accuracy: 1e-9)
+        XCTAssertEqual(Baselines.recoveryBaselineEpoch(d), 0, accuracy: 1e-9)
+
+        let now = 1_750_000_000.0
+        Baselines.recalibrateRecoveryBaselines(now: now, defaults: d)
+
+        XCTAssertEqual(Baselines.hrvBaselineEpoch(d), now, accuracy: 1e-9)
+        XCTAssertEqual(Baselines.recoveryBaselineEpoch(d), now, accuracy: 1e-9)
+    }
+
+    /// End-to-end: a poisoned baseline (a bad high first week, then real lower nights) re-anchors to the
+    /// recent reality once the reset moves the epoch — and the SAME stored history is folded both times
+    /// (nothing is deleted; only the anchor day moves).
+    func testRecalibrateReAnchorsNextComputationWithoutDeletingHistory() {
+        let d = makeDefaults()
+        // A "bad first week" worn sick (high HRV artefact), then six honest lower nights.
+        let days = ["2026-06-08", "2026-06-09", "2026-06-10", "2026-06-11", "2026-06-12", "2026-06-13",
+                    "2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-19", "2026-06-20"]
+        let vals: [Double?] = [90, 91, 89, 90, 92, 88,  54, 55, 53, 54, 56, 54]
+
+        // Before any reset the early high week anchors the baseline well above the real ~54ms.
+        let before = Baselines.foldHistory(vals, dayKeys: days, cfg: Baselines.hrvCfg,
+                                           baselineEpoch: Baselines.hrvBaselineEpoch(d))
+        XCTAssertGreaterThan(before.baseline, 70.0)
+
+        // User taps "Recalibrate Charge baseline" at the start of 2026-06-15.
+        var comps = DateComponents()
+        comps.year = 2026; comps.month = 6; comps.day = 15
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        let resetInstant = cal.date(from: comps)!.timeIntervalSince1970
+        Baselines.recalibrateRecoveryBaselines(now: resetInstant, defaults: d)
+
+        // The next computation folds the IDENTICAL history (nothing deleted) but honours the new epoch,
+        // dropping the pre-reset nights and re-seeding from tonight onward.
+        let after = Baselines.foldHistory(vals, dayKeys: days, cfg: Baselines.hrvCfg,
+                                          baselineEpoch: Baselines.hrvBaselineEpoch(d))
+        XCTAssertEqual(after.nValid, 6)                     // only the 6 post-reset nights contribute
+        XCTAssertEqual(after.baseline, 54.0, accuracy: 2.0) // re-anchored to the real value
+        XCTAssertLessThan(after.baseline, before.baseline - 10.0)
+    }
+
+    /// Reset at "now" with only pre-now history drops every night → an honest calibrating cold-start,
+    /// which is exactly what lets Today show the building/calibrating state again.
+    func testRecalibrateNowYieldsCalibratingWhenNoNewerNights() {
+        let d = makeDefaults()
+        let days = ["2026-06-01", "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05"]
+        let vals: [Double?] = [60, 61, 59, 62, 60]
+        // Anchor strictly AFTER the last night so all are dropped.
+        var comps = DateComponents(); comps.year = 2026; comps.month = 6; comps.day = 6
+        var cal = Calendar(identifier: .gregorian); cal.timeZone = TimeZone(secondsFromGMT: 0)!
+        Baselines.recalibrateRecoveryBaselines(now: cal.date(from: comps)!.timeIntervalSince1970, defaults: d)
+
+        let after = Baselines.foldHistory(vals, dayKeys: days, cfg: Baselines.hrvCfg,
+                                          baselineEpoch: Baselines.recoveryBaselineEpoch(d))
+        XCTAssertEqual(after.nValid, 0)
+        XCTAssertEqual(after.status, .calibrating)
+    }
 }

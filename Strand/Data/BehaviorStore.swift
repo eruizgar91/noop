@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import StrandAnalytics
 
 /// Settings for the strap's physical inputs and the Mac/coaching automations built on top of the
 /// live event + biometric stream. UserDefaults-backed (single-user, on-device).
@@ -39,6 +40,9 @@ final class BehaviorStore: ObservableObject {
     @Published var smartAlarmEnabled: Bool { didSet { d.set(smartAlarmEnabled, forKey: K.alarmOn) } }
     /// Target wake time, minutes since local midnight.
     @Published var smartAlarmMinutes: Int { didSet { d.set(smartAlarmMinutes, forKey: K.alarmTime) } }
+    /// Weekdays the alarm fires on (Calendar weekday numbers: 1 = Sun … 7 = Sat). An empty set means
+    /// "every day" — the backward-compatible default for anyone upgrading from before per-day scheduling.
+    @Published var smartAlarmWeekdays: Set<Int> { didSet { d.set(Array(smartAlarmWeekdays).sorted(), forKey: K.alarmWeekdays) } }
 
     // MARK: Illness early-warning
     @Published var illnessWatch: Bool { didSet { d.set(illnessWatch, forKey: K.illness) } }
@@ -63,6 +67,7 @@ final class BehaviorStore: ObservableObject {
         static let stressUseResonance = "biofeedback.stressUseResonancePace"
         static let alarmOn = "behavior.smartAlarmEnabled"
         static let alarmTime = "behavior.smartAlarmMinutes"
+        static let alarmWeekdays = "behavior.smartAlarmWeekdays"
         // "behavior.smartAlarmWindow" retired: it was stored but never read (no wake-window
         // watcher ever shipped). The defaults key is left orphaned on purpose — harmless, and
         // preserved should a real light-sleep watcher ever land.
@@ -84,7 +89,32 @@ final class BehaviorStore: ObservableObject {
         stressUseResonancePace = d.object(forKey: K.stressUseResonance) as? Bool ?? true
         smartAlarmEnabled = d.object(forKey: K.alarmOn) as? Bool ?? false
         smartAlarmMinutes = d.object(forKey: K.alarmTime) as? Int ?? 7 * 60       // 07:00
+        // Stored as a plain [Int]; only valid weekday numbers (1…7) are kept so a corrupted defaults
+        // entry can never schedule against a bogus day. Empty (or all 7) = every day.
+        smartAlarmWeekdays = Set((d.array(forKey: K.alarmWeekdays) as? [Int] ?? []).filter { (1...7).contains($0) })
         illnessWatch = d.object(forKey: K.illness) as? Bool ?? false
         batteryAlerts = d.object(forKey: K.batteryAlerts) as? Bool ?? true
+    }
+
+    // MARK: Charge baseline recalibration
+
+    /// Epoch SECONDS the Charge build-up was last manually reset from, or 0 if never. Reads the SAME
+    /// canonical key the analytics engine folds against (`Baselines.recoveryBaselineEpochKey`) — no
+    /// second source of truth. The "Recalibrate Charge baseline" Settings button writes it (and the
+    /// sibling HRV epoch) via `recalibrateChargeBaseline()`.
+    var chargeBaselineEpoch: Double { Baselines.recoveryBaselineEpoch(d) }
+
+    /// True once the user has manually recalibrated their Charge baseline. Lets a surface (e.g. the
+    /// Today "building" hint) explain WHY the score is calibrating again — an honest "you reset it",
+    /// not a silent cold-start.
+    var didRecalibrateCharge: Bool { chargeBaselineEpoch > 0 }
+
+    /// Restart the ~4-night Charge build-up from `now`: re-anchor every baseline that feeds Charge
+    /// (HRV plus resting HR / respiration / skin temp) WITHOUT deleting any stored day. Delegates to
+    /// the single cross-platform source of truth so iOS, macOS and the Android twin stay in lockstep.
+    /// After calling this the next baseline computation re-seeds from tonight, so Today honestly shows
+    /// the calibrating/building state again. The caller is responsible for kicking a recompute + refresh.
+    func recalibrateChargeBaseline(now: Double = Date().timeIntervalSince1970) {
+        Baselines.recalibrateRecoveryBaselines(now: now, defaults: d)
     }
 }

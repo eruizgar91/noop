@@ -4,11 +4,15 @@ import android.content.Context
 import android.util.Log
 import com.noop.data.DeviceRegistry
 import com.noop.data.PairedDeviceRow
+import com.noop.data.SourceKind
 import com.noop.data.StreamBatch
 import com.noop.data.WhoopRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 /**
@@ -83,11 +87,37 @@ class SourceCoordinator(
      *  [StandardHrSource] as its `log`; kept SEPARATE from [log] above (which defaults to logcat and only
      *  carries the multi-WHOOP adoption notice). Default no-op keeps existing call sites compiling. */
     private val straplog: (String) -> Unit = {},
+    /** Push a strap's battery percent into the live state (e.g. `ble::publishExternalBattery`), so a
+     *  generic strap / FTMS machine surfaces its charge where the WHOOP strap battery does. Default no-op
+     *  keeps existing call sites + JVM tests compiling unchanged. */
+    private val batterySink: (Int) -> Unit = {},
+    /** Push the latest instantaneous speed/cadence/power from a connected standard fitness sensor
+     *  (RSC/CSC/CPS), read ADDITIVELY alongside HR by [StandardHrSource], into the live state the in-workout
+     *  UI observes (wired at the composition root to `ble::publishExternalSensorMetrics`). PURE ADDITIVE — it
+     *  never touches HR/R-R/persistence/scoring, only the additive sensor readout. Forwarded only on the
+     *  generic-HR strap path (a footpod / bike sensor / power meter rides StandardHrSource). Default no-op
+     *  keeps existing call sites + JVM tests compiling unchanged. */
+    private val sensorSink: (StandardHrSource.SensorMetrics) -> Unit = {},
 ) {
+
+    /** Latest instantaneous speed/cadence/power from the active standard fitness sensor (RSC/CSC/CPS),
+     *  read ADDITIVELY alongside HR by [StandardHrSource]. The in-workout UI observes this to surface the
+     *  values beside heart rate. PURE ADDITIVE — fed only by the generic-HR strap path; reset to empty when
+     *  no strap source is live, so a stale readout can't outlive the link. Never carries HR / scoring. */
+    private val _sensorMetrics = MutableStateFlow(StandardHrSource.SensorMetrics())
+    val sensorMetrics: StateFlow<StandardHrSource.SensorMetrics> = _sensorMetrics.asStateFlow()
 
     /** The lazily-created generic-strap source. null until the first switch to a strap; reused after. */
     private var standardSource: StandardHrSource? = null
-    /** The deviceId [standardSource] is currently running for (so we don't churn on the same id). */
+    /** The lazily-created FTMS gym-equipment source. null until the first switch to a gym machine. An FTMS
+     *  device (sourceKind "ftms") is a non-WHOOP live source, so it runs through the SAME strap edge as
+     *  [standardSource] — only the source object differs. Exactly one of the two is ever live at a time. */
+    private var ftmsSource: FtmsSource? = null
+    /** The lazily-created EXPERIMENTAL Huami source (Amazfit / Zepp / Mi Band). null until the first switch
+     *  to a "huami" device. Like the others it's a non-WHOOP live source sharing the same strap edge —
+     *  exactly one of the non-WHOOP sources is ever live at a time. */
+    private var huamiSource: HuamiHrSource? = null
+    /** The deviceId the active non-WHOOP source ([standardSource]/[ftmsSource]/[huamiSource]) runs for. */
     private var activeStrapId: String? = null
     /** The WHOOP registry id we last pointed the connection at, so a WHOOP→WHOOP switch is detected and a
      *  repeat activation of the SAME WHOOP is a no-op. null until the first WHOOP activation. (MW-3) */
@@ -198,8 +228,8 @@ class SourceCoordinator(
 
         when {
             onStrap -> {
-                // Coming back from a generic strap: tear that source down first, then resume WHOOP.
-                standardSource?.stop()
+                // Coming back from a generic strap / FTMS machine: tear that source down first, then resume.
+                tearDownNonWhoopSource()
                 activeStrapId = null
                 onStrap = false
                 pointWhoop(id, peripheralId)
@@ -241,33 +271,81 @@ class SourceCoordinator(
      * [StandardHrSource] for this strap's deviceId. Re-running for the SAME id is a no-op.
      */
     private fun switchToStrap(id: String, devices: List<PairedDeviceRow>) {
-        if (activeStrapId == id) return   // already streaming this strap → no churn
-        if (!onStrap) stopWhoop()         // leaving WHOOP for the first strap → pause its BLE
-        standardSource?.stop()            // strap→strap: stop the previous source first
+        if (activeStrapId == id) return   // already streaming this source → no churn
+        if (!onStrap) stopWhoop()         // leaving WHOOP for the first non-WHOOP source → pause its BLE
+        tearDownNonWhoopSource()          // source→source: stop the previous source first
 
         // Non-null in production (set at the composition root); only the JVM-test paths that never reach a
-        // strap switch leave them null. Fail loudly rather than silently no-op if that invariant breaks.
+        // strap switch leave it null. Fail loudly rather than silently no-op if that invariant breaks.
         val ctx = requireNotNull(context) { "SourceCoordinator.context is required to run a strap source" }
-        val repo = requireNotNull(repository) { "SourceCoordinator.repository is required to persist strap samples" }
+        val row = devices.firstOrNull { it.id == id }
+        val address = row?.peripheralId
 
-        val source = StandardHrSource(
-            context = ctx,
-            deviceId = id,
-            liveSink = liveSink,
-            persist = { batch: StreamBatch, deviceId: String ->
-                scope.launch { runCatching { repo.insert(batch, deviceId) } }
-            },
-            log = straplog,   // generic-HR lifecycle → the SAME exported strap log (issue #421)
-        )
-        // CONNECT to the active strap's known BLE address, don't just scan. The previous code only called
-        // scan() (it discovered the strap and listed it, but never connected) — so a Polar H10 etc. showed
-        // up in the log as "found" yet never streamed (#421). connect(address) connects directly via
-        // getRemoteDevice; we fall back to a bare scan only if the registry row somehow has no address.
-        val address = devices.firstOrNull { it.id == id }?.peripheralId
-        if (!address.isNullOrEmpty()) source.connect(address) else source.scan()
-        standardSource = source
+        // Route by sourceKind: an FTMS gym machine runs the FtmsSource; an EXPERIMENTAL Huami device
+        // (Amazfit / Zepp / Mi Band) runs the HuamiHrSource; everything else is a generic HR strap on
+        // StandardHrSource. All are non-WHOOP live sources sharing this same strap edge.
+        if (row?.sourceKind == SourceKind.ftms.name) {
+            val source = FtmsSource(
+                context = ctx,
+                liveSink = { hr -> liveSink(hr, emptyList()) },  // machine HR → the existing live recorder
+                onBattery = batterySink,                          // machine battery → the same live state
+                log = straplog,
+            )
+            if (!address.isNullOrEmpty()) source.connect(address) else source.scan()
+            ftmsSource = source
+        } else if (row?.sourceKind == SourceKind.huami.name) {
+            val repo = requireNotNull(repository) { "SourceCoordinator.repository is required to persist Huami samples" }
+            val source = HuamiHrSource(
+                context = ctx,
+                deviceId = id,
+                liveSink = { hr -> liveSink(hr, emptyList()) },   // Huami HR → the existing live recorder
+                persist = { batch: StreamBatch, deviceId: String ->
+                    scope.launch { runCatching { repo.insert(batch, deviceId) } }
+                },
+                log = straplog,
+                onBattery = batterySink,
+            )
+            if (!address.isNullOrEmpty()) source.connect(address) else source.scan()
+            huamiSource = source
+        } else {
+            val repo = requireNotNull(repository) { "SourceCoordinator.repository is required to persist strap samples" }
+            val source = StandardHrSource(
+                context = ctx,
+                deviceId = id,
+                liveSink = liveSink,
+                persist = { batch: StreamBatch, deviceId: String ->
+                    scope.launch { runCatching { repo.insert(batch, deviceId) } }
+                },
+                log = straplog,   // generic-HR lifecycle → the SAME exported strap log (issue #421)
+                onBattery = batterySink,  // strap battery → the same live state the WHOOP strap battery uses
+                sensorSink = { metrics ->
+                    // Additive speed/cadence/power → the coordinator's own flow the in-workout UI observes,
+                    // AND the optionally-injected sink (default no-op). Never HR / R-R / scoring.
+                    _sensorMetrics.value = metrics
+                    sensorSink(metrics)
+                },
+            )
+            // CONNECT to the active strap's known BLE address, don't just scan. The previous code only
+            // called scan() (it discovered the strap and listed it, but never connected) — so a Polar H10
+            // etc. showed up as "found" yet never streamed (#421). connect(address) connects directly via
+            // getRemoteDevice; we fall back to a bare scan only if the registry row has no address.
+            if (!address.isNullOrEmpty()) source.connect(address) else source.scan()
+            standardSource = source
+        }
         activeStrapId = id
         onStrap = true
+    }
+
+    /** Stop whichever non-WHOOP source (standard strap, FTMS machine, or Huami device) is live, and drop
+     *  the reference. Idempotent. Exactly one is ever live, but we stop all defensively. */
+    private fun tearDownNonWhoopSource() {
+        standardSource?.stop(); standardSource = null
+        ftmsSource?.stop(); ftmsSource = null
+        huamiSource?.stop(); huamiSource = null
+        // A stale speed/cadence/power readout must not outlive the strap session (the source's own stop()
+        // already pushes an empty SensorMetrics, but reset here too so leaving for WHOOP / FTMS / Huami —
+        // none of which feed this flow — is clean and immediate).
+        _sensorMetrics.value = StandardHrSource.SensorMetrics()
     }
 
     companion object {

@@ -785,6 +785,17 @@ class WhoopBleClient(
         }
     }
 
+    /**
+     * Surface a non-WHOOP source's battery percent ([pct], 0–100) in the SAME live [state] the UI reads,
+     * so a generic strap / FTMS machine shows its charge where the WHOOP strap battery does. Additive twin
+     * of [publishExternalLiveHr]; called by [SourceCoordinator] ONLY while WHOOP's own BLE is paused (a
+     * non-WHOOP device is active), so it never races the WHOOP battery path. Out-of-range values are
+     * ignored. Mirrors the Swift StandardHRSource→LiveState.setBattery wiring.
+     */
+    fun publishExternalBattery(pct: Int) {
+        if (pct in 0..100) _state.value = _state.value.copy(batteryPct = pct.toDouble())
+    }
+
     // MARK: Android Bluetooth handles.
     private val bluetoothManager: BluetoothManager? =
         context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
@@ -987,6 +998,8 @@ class WhoopBleClient(
                         // 15-min loop. 0 = no recalibration.
                         baselineEpoch = NoopPrefs.of(context)
                             .getLong(Baselines.hrvBaselineEpochKey, 0L).toDouble(),
+                        recoveryEpoch = NoopPrefs.of(context)
+                            .getLong(Baselines.recoveryBaselineEpochKey, 0L).toDouble(),
                     )
                 }.onSuccess {
                     log("Backfill: post-sync scoring pass done")
@@ -1740,9 +1753,11 @@ class WhoopBleClient(
     /**
      * Arm the strap's **firmware** alarm to buzz at [epochSec] (absolute UTC seconds). The strap fires
      * at that instant even if the phone is asleep or NOOP is closed. SET_CLOCK is sent first so the
-     * strap's RTC is UTC-correct (a wrong RTC fires the alarm at the wrong wall-clock time). Payload =
-     * `[0x01] + u32 LE epoch + [0x00, 0x00]`. Port of macOS `BLEManager.armStrapAlarm`. WHOOP 4.0; on
-     * 5/MG `send()` drops it (the 5/MG command set isn't verified for this yet).
+     * strap's RTC is UTC-correct (a wrong RTC fires the alarm at the wrong wall-clock time). The 4.0
+     * payload is `[0x01] + u32 LE epoch + [0x00, 0x00] + [0x00, 0x00]` (9 bytes — see
+     * [whoop4AlarmPayload]; the trailing two bytes are the haptic-mode field the official app sends,
+     * added per @ujix's wire capture #535). Port of macOS `BLEManager.armStrapAlarm`. WHOOP 4.0; on
+     * 5/MG `send()` uses the separate REVISION_4 path.
      */
     fun armStrapAlarm(epochSec: Long) {
         if (connectedFamily == DeviceFamily.WHOOP5) {
@@ -1760,16 +1775,7 @@ class WhoopBleClient(
             return
         }
         sendSetClockBothForms()
-        val e = epochSec.toInt()
-        val payload = byteArrayOf(
-            0x01,
-            (e and 0xFF).toByte(),
-            ((e shr 8) and 0xFF).toByte(),
-            ((e shr 16) and 0xFF).toByte(),
-            ((e shr 24) and 0xFF).toByte(),
-            0x00, 0x00,
-        )
-        send(CommandNumber.SET_ALARM_TIME, payload)
+        send(CommandNumber.SET_ALARM_TIME, whoop4AlarmPayload(epochSec))
         log("Alarm: armed (epoch $epochSec)")
     }
 
@@ -4095,6 +4101,29 @@ class WhoopBleClient(
 //     are too short / dotted to match.
 private val PII_MAC_RE = Regex("([0-9A-Fa-f]{2}):[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:([0-9A-Fa-f]{2})")
 private val PII_WHOOP_SERIAL_RE = Regex("WHOOP (\\d[0-9A-Za-z]{5,})")
+
+/**
+ * Builds the 9-byte WHOOP 4.0 SET_ALARM_TIME (cmd 66) payload.
+ * Layout: `[0x01] + u32 LE epoch + [0x00, 0x00]` subseconds + `[0x00, 0x00]` haptic-mode field.
+ *
+ * The earlier 7-byte form omitted the trailing two bytes; the strap ACKed it but never buzzed (#428).
+ * @ujix's btsnoop capture of the official WHOOP app (#535) shows the official app always sends 9 bytes,
+ * so we now match it. The buzz itself is still unconfirmed on our side — no WHOOP 4.0 owner has reported
+ * a strap-driven wake firing yet — so the Automations UI keeps a "keep a backup alarm" caveat.
+ * Pinned byte-for-byte by `Whoop4AlarmPayloadTest`.
+ */
+internal fun whoop4AlarmPayload(epochSec: Long): ByteArray {
+    val e = epochSec.toInt()
+    return byteArrayOf(
+        0x01,
+        (e and 0xFF).toByte(),
+        ((e shr 8) and 0xFF).toByte(),
+        ((e shr 16) and 0xFF).toByte(),
+        ((e shr 24) and 0xFF).toByte(),
+        0x00, 0x00, // subseconds (always 0 — minute-precision alarm)
+        0x00, 0x00, // haptic-mode field required to actually buzz (official-app wire capture, #535)
+    )
+}
 
 /** Mask MAC addresses and WHOOP serials in a strap-log line before it's shown/exported.
  *  TOTAL — never throws: a redaction failure returns a safe placeholder rather than leaking the raw

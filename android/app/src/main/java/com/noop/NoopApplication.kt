@@ -94,6 +94,8 @@ class NoopApplication : Application() {
             // Generic-HR connect lifecycle → the SAME in-app strap log the user exports, so a
             // "connected but no data" report (issue #421) is no longer blind to the Polar/Wahoo/etc path.
             straplog = { ble.externalLog(it) },
+            // A generic strap's standard battery (0x180F) → the same live battery field the WHOOP uses.
+            batterySink = { pct -> ble.publishExternalBattery(pct) },
         )
     }
 }

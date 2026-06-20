@@ -419,7 +419,7 @@ private fun WhatItDoesStep() {
                 icon = Icons.Filled.MonitorHeart,
                 tint = Palette.accent,
                 title = "Watch your heart, live",
-                body = "Connect your strap and watch each beat in real time, with zones that match your profile.",
+                body = "Connect a WHOOP, a heart-rate strap or a gym machine and watch each beat in real time, with zones that match your profile. Already have history elsewhere? Import it from WHOOP, Apple Health, Oura, Fitbit or Garmin.",
             )
             FeatureRow(
                 icon = Icons.Filled.Lock,
@@ -617,7 +617,8 @@ private fun ConnectStep(viewModel: AppViewModel) {
             if (!live.bonded) {
                 Text(
                     "No WHOOP? You can still continue. Pair a heart-rate strap (Polar, Wahoo, Coospo, Garmin HRM…) " +
-                        "or import your WHOOP data later under Settings → Devices.",
+                        "or a gym machine under Devices, or import from WHOOP, Apple Health, Oura, Fitbit, Garmin " +
+                        "and more under Data Sources. You can do either any time.",
                     style = NoopType.footnote,
                     color = Palette.textTertiary,
                     textAlign = TextAlign.Center,

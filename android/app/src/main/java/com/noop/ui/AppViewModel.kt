@@ -25,6 +25,7 @@ import com.noop.analytics.UserProfile
 import com.noop.analytics.WorkoutSport
 import com.noop.location.GpsSession
 import kotlinx.coroutines.Job
+import com.noop.ble.HrBroadcaster
 import com.noop.ble.LiveState
 import com.noop.ble.WhoopConnectionService
 import com.noop.ble.WhoopModel
@@ -138,7 +139,54 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             deviceId = "scan-preview",
             liveSink = { _, _ -> },
             persist = { _, _ -> },
+            // Route the throwaway scanner's diagnostics into the SAME exported strap log the active path
+            // uses (issue #421 parity), so a tester's wizard scan is captured. The source self-prefixes
+            // "HR-strap: "; [externalLog] redacts addresses. Privacy-safe: statuses / counts only.
+            log = { ble.externalLog(it) },
         )
+
+    /**
+     * A DISCOVERY-ONLY [com.noop.ble.FtmsSource] for the Add-gym-equipment wizard. Runs its OWN scan and
+     * never connects here — the [SourceCoordinator] owns connection once an FTMS machine becomes active.
+     * The sinks are no-ops; the wizard only reads its `discovered` / `scanning` StateFlows. Mirrors the
+     * macOS AddDeviceWizard's throwaway FTMSSource(feedsLive: false).
+     */
+    fun makeFtmsScanner(): com.noop.ble.FtmsSource =
+        com.noop.ble.FtmsSource(
+            context = appContext,
+            liveSink = { },
+            // Wizard scan diagnostics → the SAME exported strap log the active path uses (issue #421).
+            // The source self-prefixes "FTMS: "; [externalLog] redacts addresses. Statuses / counts only.
+            log = { ble.externalLog(it) },
+        )
+
+    /**
+     * A DISCOVERY-ONLY EXPERIMENTAL [com.noop.ble.HuamiHrSource] for the Add-Amazfit/Mi-Band wizard. Runs
+     * its OWN scan and never connects/persists here — the [SourceCoordinator] owns connection once a Huami
+     * device becomes active. The sinks are no-ops; the wizard only reads its `discovered` / `scanning`
+     * StateFlows. Mirrors the macOS AddDeviceWizard's throwaway HuamiHRSource(feedsLive: false).
+     */
+    fun makeHuamiScanner(): com.noop.ble.HuamiHrSource =
+        com.noop.ble.HuamiHrSource(
+            context = appContext,
+            deviceId = "scan-preview",
+            liveSink = { },
+            // Wizard scan diagnostics → the SAME exported strap log the active path uses (issue #421).
+            // The source self-prefixes "Huami: "; [externalLog] redacts addresses. Statuses / counts only.
+            log = { ble.externalLog(it) },
+        )
+
+    /**
+     * A DISCOVERY-ONLY EXPERIMENTAL [com.noop.ble.OuraProbeSource] for the Add-Oura wizard. Detects the
+     * ring and reports the honest dead-end (no open live stream → use file import). Never streams or
+     * persists. Mirrors the macOS AddDeviceWizard's throwaway OuraProbeSource.
+     */
+    fun makeOuraScanner(): com.noop.ble.OuraProbeSource =
+        // Route the probe's diagnostics (incl. the honest "no open live stream" dead-end) into the SAME
+        // exported strap log the active path uses (issue #421 parity), so a tester's Oura wizard scan is
+        // captured. The source self-prefixes "Oura: "; [externalLog] redacts addresses. Statuses / service
+        // UUIDs / counts only, never a device address.
+        com.noop.ble.OuraProbeSource(context = appContext, log = { ble.externalLog(it) })
 
     // MARK: - Add-a-device wizard (multi-WHOOP, MW-4) — thin pass-throughs to the BLE client.
 
@@ -251,6 +299,11 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     val smartAlarmEnabled: StateFlow<Boolean> = _smartAlarmEnabled.asStateFlow()
     private val _smartAlarmMinutes = MutableStateFlow(NoopPrefs.smartAlarmMinutes(appContext))
     val smartAlarmMinutes: StateFlow<Int> = _smartAlarmMinutes.asStateFlow()
+    // Enabled weekdays for the strap alarm (Calendar.DAY_OF_WEEK 1=Sun…7=Sat). Empty = every day.
+    // Declared alongside the other _smartAlarm* fields (above init) for the same #84 reason. Mirrors
+    // macOS BehaviorStore.smartAlarmWeekdays (#539).
+    private val _smartAlarmWeekdays = MutableStateFlow(NoopPrefs.smartAlarmWeekdays(appContext))
+    val smartAlarmWeekdays: StateFlow<Set<Int>> = _smartAlarmWeekdays.asStateFlow()
 
     // HR-zone haptic coaching (persisted; zone-based, mirrors macOS AppModel.coachZone). Buzzes when you
     // climb into the top zone (ease off) and — if the recovery buzz is on — when you drop back to Zone 1.
@@ -486,6 +539,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                         // button) here and thread it down — foldHistory drops every HRV night before it.
                         baselineEpoch = NoopPrefs.of(appContext)
                             .getLong(Baselines.hrvBaselineEpochKey, 0L).toDouble(),
+                        recoveryEpoch = NoopPrefs.of(appContext)
+                            .getLong(Baselines.recoveryBaselineEpochKey, 0L).toDouble(),
                     )
                     // analyzeRecent now hops to Dispatchers.Default; a scope cancellation surfaces as a
                     // CancellationException that runCatching would otherwise swallow, breaking the loop's
@@ -588,6 +643,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     private val _lastWorkout = MutableStateFlow<WorkoutRow?>(null)
     val lastWorkout: StateFlow<WorkoutRow?> = _lastWorkout.asStateFlow()
 
+    /** Durable store for an in-flight NON-GPS workout (#529). The GPS path is already process-durable via
+     *  [GpsSession] + the foreground service; a non-GPS session lived only in [_activeWorkout], so an OS
+     *  kill mid-session lost it. We snapshot non-GPS sessions to SharedPreferences on start + each sample
+     *  and rehydrate on launch so an interrupted session can still be ended and saved. */
+    private val activeWorkoutStore = ActiveWorkoutStore.from(appContext)
+
     /** Mirrors the process-level [GpsSession] route into [_activeWorkout] for live display. The route
      *  itself is collected by [WhoopConnectionService], not here, so it survives the screen turning off
      *  (#215) — this observer just republishes it to the UI while the ViewModel is alive. */
@@ -607,6 +668,30 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             GpsSession.start(startMs, sport.name)
             WhoopConnectionService.start(appContext)
             observeGpsSession()
+        } else {
+            // A non-GPS session has no process-level GpsSession backing it, so make it durable: snapshot
+            // it now (and on every captured sample) so an OS kill mid-session can be rehydrated + ended
+            // on relaunch (#529). GPS sessions are already covered by GpsSession's process durability.
+            persistNonGpsWorkout(_activeWorkout.value)
+        }
+    }
+
+    /** Snapshot the in-flight NON-GPS workout to durable storage (#529). No-op for a GPS session (the
+     *  process-level [GpsSession] already makes that durable) or when nothing is running. */
+    private fun persistNonGpsWorkout(w: ActiveWorkout?) {
+        if (w == null || w.gpsEnabled) return
+        runCatching {
+            activeWorkoutStore.save(
+                ActiveWorkoutPersistence.Snapshot(
+                    startMs = w.startMs,
+                    sportName = w.sport.name,
+                    deviceId = deviceId,
+                    samples = w.samples,
+                    avgHr = w.avgHr,
+                    peakHr = w.peakHr,
+                    liveStrain = w.liveStrain,
+                ),
+            )
         }
     }
 
@@ -639,6 +724,24 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         observeGpsSession()
     }
 
+    /**
+     * If a NON-GPS manual workout was in flight when the OS killed the process, rebuild its active-workout
+     * card from the durable snapshot so reopening the app doesn't lose it — the session can still be ended
+     * and saved (#529). The non-GPS analogue of [rehydrateActiveGpsWorkout], lighter: there's no route /
+     * foreground service to reattach, just the persisted HR window + running stats. A GPS session takes
+     * the GPS rehydrate path instead and is never persisted here, so the two never collide. No-op if a
+     * workout is already live (a live session wins over a stale snapshot) or nothing is stored.
+     */
+    private fun rehydrateActiveNonGpsWorkout() {
+        if (_activeWorkout.value != null) return
+        val snap = activeWorkoutStore.load() ?: return
+        val sport = WorkoutSport.all.firstOrNull { it.name == snap.sportName } ?: WorkoutSport.default
+        _activeWorkout.value = ActiveWorkout(
+            startMs = snap.startMs, sport = sport, gpsEnabled = false,
+            samples = snap.samples, avgHr = snap.avgHr, peakHr = snap.peakHr, liveStrain = snap.liveStrain,
+        )
+    }
+
     /** Finish the active workout: score the captured HR window + finalize the GPS route, save a
      *  WorkoutRow, and (opt-in) write it to Health Connect. A session with no HR AND no track is
      *  discarded quietly. Double-buzz confirms the save. */
@@ -646,6 +749,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val w = _activeWorkout.value ?: return
         _activeWorkout.value = null
         gpsJob?.cancel(); gpsJob = null
+        // Drop the durable non-GPS snapshot the instant the session ends — whether it saves below or is
+        // discarded as too-short — so a relaunch never rehydrates an already-finished session (#529).
+        activeWorkoutStore.clear()
         // The process-level session is authoritative for the route: it kept accumulating even if this
         // ViewModel was cleared mid-ride (screen off), so [w.track] may be stale. Stop it and take its
         // final track. A non-GPS workout has nothing in the session, so fall back to the local track. (#215)
@@ -683,8 +789,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         buzz(2)
         viewModelScope.launch {
             runCatching { repository.upsertWorkouts(listOf(row)) }
+            // #528: persist the live 1 Hz workout HR into hrSample so it can export to Health Connect
+            // at full resolution NOW (the HR export keeps workout-window samples un-decimated), instead
+            // of only after the next strap offload sync. IGNORE-on-conflict makes a later sync of the
+            // same seconds a no-op.
+            runCatching { if (samples.isNotEmpty()) repository.insertHr(samples) }
             if (_hcWriteback.value) {
                 runCatching { HealthConnectWriter.writeExercise(appContext, row, w.sport.exerciseType) }
+                // #528: export the just-captured HR series now (workout row already upserted above, so
+                // the export's window logic keeps these samples at full 1 Hz rather than ~1/30 s).
+                writebackHealthConnectNow()
             }
         }
     }
@@ -701,9 +815,12 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         val w = _activeWorkout?.value ?: return
         val s = w.samples + HrSample(deviceId = deviceId, ts = System.currentTimeMillis() / 1000, bpm = bpm)
         val strain = StrainScorer.strain(s, maxHR = profileStore.hrMax.toDouble(), sex = profileStore.sex) ?: 0.0
-        _activeWorkout.value = w.copy(
+        val updated = w.copy(
             samples = s, avgHr = s.sumOf { it.bpm } / s.size, peakHr = s.maxOf { it.bpm }, liveStrain = strain,
         )
+        _activeWorkout.value = updated
+        // Re-snapshot the durable non-GPS session so a process kill keeps the latest accumulated HR (#529).
+        persistNonGpsWorkout(updated)
     }
 
     // MARK: - Workouts screen (load + manual edit · relabel · dismiss · delete) (#107)
@@ -913,6 +1030,49 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         ble.debugLogcat = enabled
     }
 
+    // --- Broadcast heart rate (NOOP acts as a standard BLE HR peripheral; gym kit reads the strap HR) ---
+    //
+    // OPT-IN, OFF BY DEFAULT, OFFLINE. When on, [HrBroadcaster] advertises the standard Heart Rate Service
+    // (0x180D) and notifies 0x2A37 with each live strap HR, so a treadmill / Zwift / Peloton can read the
+    // WHOOP HR NOOP receives. LOCAL Bluetooth only — nothing leaves the device. The broadcaster is a pure
+    // CONSUMER of [ble.state].heartRate (fed in the state-collect loop in init); it never writes back into
+    // the WHOOP path, so the strap connection and scoring can't regress.
+    private val broadcaster = HrBroadcaster(appContext, log = { ble.externalLog(it) })
+
+    private val _hrBroadcast = MutableStateFlow(NoopPrefs.hrBroadcast(appContext))
+    /** Whether the "Broadcast heart rate" toggle is on. Default OFF. */
+    val hrBroadcast: StateFlow<Boolean> = _hrBroadcast.asStateFlow()
+    /** True while NOOP is actually advertising as an HR peripheral (radio on + permission granted). */
+    val hrBroadcastAdvertising: StateFlow<Boolean> = broadcaster.advertising
+    /** How many centrals (gym kit / apps) are subscribed to the broadcast right now. */
+    val hrBroadcastSubscribers: StateFlow<Int> = broadcaster.subscriberCount
+    /** A human-readable reason the broadcast can't run (Bluetooth off / no permission), or null. */
+    val hrBroadcastStatus: StateFlow<String?> = broadcaster.statusNote
+
+    init {
+        // Re-broadcast the live strap HR whenever it changes, but only while the toggle is on. Kept as its
+        // own collector so it's a clean pure-consumer of LiveState; [HrBroadcaster.update] itself no-ops
+        // when broadcasting isn't wanted, so this is harmless when the toggle is off.
+        viewModelScope.launch {
+            ble.state.collect { state -> broadcaster.update(state.heartRate) }
+        }
+        // Resume broadcasting on launch if the user had it on (and the OS permission survives). If the
+        // permission was revoked, [HrBroadcaster.start] degrades to a status note rather than crashing.
+        if (_hrBroadcast.value) broadcaster.start()
+    }
+
+    /**
+     * Flip "Broadcast heart rate" (driven by Data Sources). Persists the preference and starts/stops the
+     * HR peripheral immediately. The Compose layer requests BLUETOOTH_ADVERTISE + BLUETOOTH_CONNECT before
+     * calling this with `enabled = true` (Android 12+); if those aren't held, [HrBroadcaster.start]
+     * surfaces a status note instead of broadcasting. Default OFF.
+     */
+    fun setHrBroadcast(enabled: Boolean) {
+        _hrBroadcast.value = enabled
+        NoopPrefs.setHrBroadcast(appContext, enabled)
+        if (enabled) broadcaster.start() else broadcaster.stop()
+    }
+
     // --- Health Connect periodic auto-sync (Samsung Health → Health Connect → NOOP) ---
     private val _hcAutoSync = MutableStateFlow(NoopPrefs.hcAutoSync(appContext))
     val hcAutoSync: StateFlow<Boolean> = _hcAutoSync.asStateFlow()
@@ -935,6 +1095,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         // in THIS init — not the first one above — because it reads _activeWorkout, which is declared
         // below the first init block and would still be null there (JVM field init order). (#215)
         rehydrateActiveGpsWorkout()
+        // Then, if no GPS session claimed the card, rehydrate a NON-GPS manual workout from its durable
+        // snapshot so an OS kill mid-session can still be ended + saved (#529). Order matters: a live GPS
+        // session wins; the non-GPS path only fills in when [_activeWorkout] is still null.
+        rehydrateActiveNonGpsWorkout()
     }
 
     /** Flip auto-sync. Persists and, on enable, kicks an immediate import; thereafter it catches up on
@@ -1050,6 +1214,15 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         applySmartAlarm()
     }
 
+    /** Set which weekdays the strap alarm fires on (Calendar.DAY_OF_WEEK 1=Sun…7=Sat; empty = every
+     *  day). Re-arms so the change takes effect immediately. Mirrors macOS (#539). */
+    fun setSmartAlarmWeekdays(days: Set<Int>) {
+        val clean = days.filter { it in 1..7 }.toSet()
+        _smartAlarmWeekdays.value = clean
+        NoopPrefs.setSmartAlarmWeekdays(appContext, clean)
+        applySmartAlarm()
+    }
+
     // --- PHONE smart alarm (#207). The setters persist + (re)arm the GUARANTEED OS alarm via
     // [SmartAlarmScheduler]: scheduling the hard deadline FIRST, before any smart logic exists, so the
     // fallback is in place the instant the alarm is enabled. Whether the strap is connected is
@@ -1160,14 +1333,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             ble.disableStrapAlarm()
             return
         }
-        val cal = java.util.Calendar.getInstance().apply {
-            set(java.util.Calendar.HOUR_OF_DAY, _smartAlarmMinutes.value / 60)
-            set(java.util.Calendar.MINUTE, _smartAlarmMinutes.value % 60)
-            set(java.util.Calendar.SECOND, 0)
-            set(java.util.Calendar.MILLISECOND, 0)
+        val epochSec = nextSmartAlarmEpochSec(_smartAlarmMinutes.value, _smartAlarmWeekdays.value)
+        if (epochSec == null) {
+            // No enabled weekday in the next week (only reachable from a corrupted set) — disarm rather
+            // than arm a misleading time the user never asked for. Mirrors macOS.
+            ble.disableStrapAlarm()
+            return
         }
-        if (cal.timeInMillis <= System.currentTimeMillis()) cal.add(java.util.Calendar.DAY_OF_YEAR, 1)
-        ble.armStrapAlarm(cal.timeInMillis / 1000)
+        ble.armStrapAlarm(epochSec)
     }
 
     /** Fire a haptic buzz on the strap (requires a bonded connection). */
@@ -1292,6 +1465,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (!NoopPrefs.backgroundConnection(appContext)) {
             ble.disconnect()
         }
+        // Release the HR-broadcast radio when this ViewModel goes away — the broadcast is a foreground
+        // convenience (read your strap HR on nearby gym kit), not a background service. A relaunch
+        // re-resumes it from the persisted toggle.
+        broadcaster.stop()
     }
 
     private companion object {
@@ -1352,4 +1529,43 @@ internal fun zoneCoachBuzzLoops(previousZone: Int, zone: Int, recoveryEnabled: B
         zone <= 1 && previousZone > 1 && recoveryEnabled -> 1
         else -> 0
     }
+}
+
+/**
+ * Next strap-alarm fire time as absolute UTC seconds, honouring the weekday selection (#539). Pure +
+ * side-effect-free so it can be unit-tested against a fixed clock. Mirrors macOS
+ * `AppModel.nextSmartAlarmDate`.
+ *
+ *  - [minuteOfDay]: target wake time, minutes since local midnight.
+ *  - [weekdays]: Calendar.DAY_OF_WEEK numbers (1=Sun…7=Sat) the alarm may fire on. Empty = every day.
+ *    Numbers outside 1…7 are ignored.
+ *  - [nowMs]/[calendarFactory]: injected for tests; default to the real clock + local calendar.
+ *
+ * Scans today through +7 days for the next strictly-future occurrence on an enabled weekday. Returns
+ * null only when no valid weekday falls in that range (i.e. the set held nothing in 1…7).
+ */
+internal fun nextSmartAlarmEpochSec(
+    minuteOfDay: Int,
+    weekdays: Set<Int>,
+    nowMs: Long = System.currentTimeMillis(),
+    calendarFactory: () -> java.util.Calendar = { java.util.Calendar.getInstance() },
+): Long? {
+    val valid = weekdays.filter { it in 1..7 }.toSet()
+    // An EMPTY input means "every day" (backward compatible). A non-empty selection that filters to
+    // nothing (only out-of-range numbers) has no valid day to fire on, so it's null, not a daily alarm.
+    if (weekdays.isNotEmpty() && valid.isEmpty()) return null
+    for (offset in 0..7) {
+        val cal = calendarFactory().apply {
+            timeInMillis = nowMs
+            add(java.util.Calendar.DAY_OF_YEAR, offset)
+            set(java.util.Calendar.HOUR_OF_DAY, minuteOfDay / 60)
+            set(java.util.Calendar.MINUTE, minuteOfDay % 60)
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }
+        if (cal.timeInMillis <= nowMs) continue
+        if (weekdays.isEmpty()) return cal.timeInMillis / 1000
+        if (valid.contains(cal.get(java.util.Calendar.DAY_OF_WEEK))) return cal.timeInMillis / 1000
+    }
+    return null
 }

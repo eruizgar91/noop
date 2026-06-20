@@ -112,4 +112,61 @@ class HrvBaselineRecalibrationTest {
         assertEquals(0, s.nValid)
         assertEquals(BaselineStatus.CALIBRATING, s.status)
     }
+
+    // ── 3. "Recalibrate Charge baseline" reset helper (writes BOTH epoch keys) ───────────────────
+
+    /**
+     * Minimal in-memory [android.content.SharedPreferences.Editor] double so this stays a pure-JVM
+     * unit test (no Robolectric / Android runtime). Only the Long path the helper uses is real;
+     * everything else is a no-op that returns `this` for chaining.
+     */
+    private class FakeEditor : android.content.SharedPreferences.Editor {
+        val longs = HashMap<String, Long>()
+        override fun putLong(key: String, value: Long) = apply { longs[key] = value }
+        override fun putString(key: String?, value: String?) = this
+        override fun putStringSet(key: String?, values: MutableSet<String>?) = this
+        override fun putInt(key: String?, value: Int) = this
+        override fun putFloat(key: String?, value: Float) = this
+        override fun putBoolean(key: String?, value: Boolean) = this
+        override fun remove(key: String?) = this
+        override fun clear() = this
+        override fun commit() = true
+        override fun apply() {}
+    }
+
+    /** The reset helper must write now-seconds to BOTH epoch keys — the whole Charge build-up restarts. */
+    @Test
+    fun recalibrateRecoveryBaselines_writesBothEpochs() {
+        val editor = FakeEditor()
+        val now = 1_750_000_000L
+        Baselines.recalibrateRecoveryBaselines(editor, now)
+        assertEquals(now, editor.longs[Baselines.hrvBaselineEpochKey])
+        assertEquals(now, editor.longs[Baselines.recoveryBaselineEpochKey])
+    }
+
+    /** End-to-end: after the reset moves the epoch, the SAME history (nothing deleted) re-anchors to the
+     *  recent reality when folded with the written epoch. */
+    @Test
+    fun recalibrateRecoveryBaselines_reAnchorsNextComputation() {
+        val days = listOf(
+            "2026-06-08", "2026-06-09", "2026-06-10", "2026-06-11", "2026-06-12", "2026-06-13",
+            "2026-06-15", "2026-06-16", "2026-06-17", "2026-06-18", "2026-06-19", "2026-06-20",
+        )
+        val vals: List<Double?> = listOf(90.0, 91.0, 89.0, 90.0, 92.0, 88.0, 54.0, 55.0, 53.0, 54.0, 56.0, 54.0)
+
+        // Bad first week anchors the baseline high before any reset.
+        val before = Baselines.foldHistory(vals, days, hrvCfg, 0.0)
+        assertTrue(before.baseline > 70.0)
+
+        // Tap Recalibrate at the start of 2026-06-15; read the epoch back out of the editor double.
+        val editor = FakeEditor()
+        val resetInstant = LocalDate.parse("2026-06-15").atStartOfDay(ZoneOffset.UTC).toEpochSecond()
+        Baselines.recalibrateRecoveryBaselines(editor, resetInstant)
+        val epoch = editor.longs.getValue(Baselines.hrvBaselineEpochKey).toDouble()
+
+        val after = Baselines.foldHistory(vals, days, hrvCfg, epoch)
+        assertEquals(6, after.nValid)            // only the 6 post-reset nights contribute
+        assertEquals(54.0, after.baseline, 2.0)  // re-anchored to the real value
+        assertTrue(after.baseline < before.baseline - 10.0)
+    }
 }

@@ -31,6 +31,13 @@ struct AddDeviceWizard: View {
         case whoop5mg
         case whoop4
         case hrStrap
+        case gymEquipment
+        // EXPERIMENTAL tier — best-effort, clean-room, can't be hardware-verified here. Each fails to an
+        // honest message and never fabricates data.
+        case amazfit       // Amazfit / Zepp incl. Helio (Huami custom or standard HR)
+        case miBand        // Xiaomi Mi Band (Huami; no-auth live HR path, honest message if auth needed)
+        case garmin        // Garmin watch (standard Broadcast HR path + an enable hint)
+        case oura          // Oura ring (no open live stream → honest dead-end, points at file import)
         var id: Self { self }
 
         var isWhoop: Bool { self == .whoop4 || self == .whoop5mg }
@@ -38,7 +45,15 @@ struct AddDeviceWizard: View {
             switch self {
             case .whoop4:   return .whoop4
             case .whoop5mg: return .whoop5mg
-            case .hrStrap:  return nil
+            default:        return nil
+            }
+        }
+
+        /// True for the EXPERIMENTAL tier (shown under a clearly-labelled "Experimental" heading).
+        var isExperimental: Bool {
+            switch self {
+            case .amazfit, .miBand, .garmin, .oura: return true
+            default:                                return false
             }
         }
     }
@@ -53,6 +68,10 @@ struct AddDeviceWizard: View {
     @State private var pickedWhoop: (uuid: String, name: String, rssi: Int)?
     /// A generic HR strap picked from the StandardHRSource scan.
     @State private var pickedStrap: StandardHRSource.DiscoveredStrap?
+    /// An FTMS gym machine picked from the FTMSSource scan.
+    @State private var pickedMachine: FTMSSource.DiscoveredMachine?
+    /// An EXPERIMENTAL Huami device (Amazfit / Zepp / Mi Band) picked from the HuamiHRSource scan.
+    @State private var pickedHuami: HuamiHRSource.DiscoveredDevice?
 
     @State private var nameDraft = ""
     /// After registering, ask whether to make the new device active.
@@ -61,11 +80,35 @@ struct AddDeviceWizard: View {
     /// Discovery-only HR source for the strap path. Never persists (no-op closure) and is never asked
     /// to `connect` — we only read its `@Published discovered` / `scanning` while scanning. Built once.
     @StateObject private var hrScanner: StandardHRSource
+    /// Discovery-only FTMS source for the gym-equipment path. `feedsLive: false` so it never writes
+    /// LiveState; we only read its `discovered` / `scanning` while scanning. Built once.
+    @StateObject private var ftmsScanner: FTMSSource
+    /// Discovery-only EXPERIMENTAL Huami scanner (Amazfit / Zepp / Mi Band). `feedsLive: false`, never
+    /// persists; the wizard only reads its `discovered` / `scanning`. Built once.
+    @StateObject private var huamiScanner: HuamiHRSource
+    /// Discovery-only EXPERIMENTAL Oura probe. Detects the ring, then reports the honest dead-end. Built once.
+    @StateObject private var ouraScanner: OuraProbeSource
 
     init(live: LiveState, onClose: @escaping () -> Void) {
         self.onClose = onClose
+        // Route each throwaway scanner's diagnostics into the SAME exported strap log the active source
+        // path uses (issue #421 parity), so a tester's wizard scan — including the Oura probe's honest
+        // "no open live stream" dead-end — is captured in a shared debug bundle. The sources already
+        // self-prefix their lines ("HR-strap: " / "FTMS: " / "Huami: " / "Oura: "); we add the same
+        // "[HH:mm:ss]" stamp AppModel's `straplog` uses so wizard lines read identically. Each source is
+        // @MainActor and only calls this from the main actor, so the forward into @MainActor LiveState is
+        // safe. Privacy-safe: statuses / service UUIDs / counts only, never a device address.
+        let wizardLog: (String) -> Void = { line in
+            MainActor.assumeIsolated {
+                live.append(log: "[\(AppModel.logTimeFormatter.string(from: Date()))] \(line)")
+            }
+        }
         _hrScanner = StateObject(wrappedValue: StandardHRSource(
-            live: live, deviceId: "scan-preview", persist: { _ in }))
+            live: live, deviceId: "scan-preview", persist: { _ in }, log: wizardLog))
+        _ftmsScanner = StateObject(wrappedValue: FTMSSource(live: live, log: wizardLog, feedsLive: false))
+        _huamiScanner = StateObject(wrappedValue: HuamiHRSource(
+            live: live, deviceId: "scan-preview", log: wizardLog, feedsLive: false))
+        _ouraScanner = StateObject(wrappedValue: OuraProbeSource(log: wizardLog))
     }
 
     var body: some View {
@@ -164,11 +207,26 @@ struct AddDeviceWizard: View {
             typeRow(.hrStrap, icon: "heart.circle",
                     title: "Heart-rate strap",
                     subtitle: "Polar, Wahoo, Coospo, Garmin HRM, Amazfit Helio broadcast")
+            typeRow(.gymEquipment, icon: "figure.run.treadmill",
+                    title: "Gym equipment",
+                    subtitle: "Treadmill, indoor bike, rower or cross-trainer (Bluetooth FTMS)")
 
-            Text("Coming soon").strandOverline().padding(.top, 8)
-            comingSoonRow(icon: "applewatch", title: "Garmin watch")
-            comingSoonRow(icon: "waveform.path.ecg.rectangle", title: "Amazfit / Zepp")
-            comingSoonRow(icon: "square.and.arrow.down", title: "Import from Oura or Fitbit")
+            // EXPERIMENTAL tier — clearly labelled, opt-in, best-effort. Each is honest about what it can
+            // actually read; none fabricates data.
+            Text("Experimental").strandOverline().padding(.top, 8)
+            experimentalTierNote
+            typeRow(.amazfit, icon: "waveform.path.ecg.rectangle",
+                    title: "Amazfit / Zepp",
+                    subtitle: "Incl. Helio. Live heart rate where the band exposes it. Help us test.")
+            typeRow(.miBand, icon: "waveform.path.ecg",
+                    title: "Xiaomi Mi Band",
+                    subtitle: "Live heart rate on bands that don't need pairing. Help us test.")
+            typeRow(.garmin, icon: "applewatch",
+                    title: "Garmin watch",
+                    subtitle: "Uses the watch's Broadcast Heart Rate. We'll show you how.")
+            typeRow(.oura, icon: "circle.circle",
+                    title: "Oura ring",
+                    subtitle: "Live isn't available. We'll check, then point you to file import.")
 
             whoopFirstNote
         }
@@ -205,33 +263,13 @@ struct AddDeviceWizard: View {
         .accessibilityLabel("\(title). \(subtitle)")
     }
 
-    private func comingSoonRow(icon: String, title: String) -> some View {
-        HStack(spacing: 14) {
-            Image(systemName: icon)
-                .font(StrandFont.title2)
-                .foregroundStyle(StrandPalette.textTertiary)
-                .frame(width: 30)
-                .accessibilityHidden(true)
-            Text(title).font(StrandFont.headline)
-                .foregroundStyle(StrandPalette.textTertiary)
-            Spacer()
-            StatePill("Soon", tone: .neutral, showsDot: false)
-        }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .frostedCardSurface(cornerRadius: 14)
-        .opacity(0.55)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(title), coming soon")
-    }
-
     // MARK: Step 2 — type-specific prep + guidance
 
     @ViewBuilder private var prepStep: some View {
         if let type {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 14) {
-                    Image(systemName: type.isWhoop ? "applewatch.side.right" : "heart.circle")
+                    Image(systemName: typeIcon(type))
                         .font(.system(size: 30))
                         .foregroundStyle(StrandPalette.accent)
                         .accessibilityHidden(true)
@@ -242,6 +280,8 @@ struct AddDeviceWizard: View {
 
                 if type == .whoop5mg {
                     experimentalNote
+                } else if type.isExperimental {
+                    experimentalTierNote
                 }
 
                 VStack(alignment: .leading, spacing: 12) {
@@ -299,6 +339,45 @@ struct AddDeviceWizard: View {
                 "Make sure it isn't connected to another app (a bike computer, the brand's own app…).",
                 "NOOP will look for it nearby.",
             ]
+        case .gymEquipment:
+            return [
+                "Wake the machine — start pedalling, walking or rowing so it powers on its Bluetooth.",
+                "Make sure it isn't already connected to another app (Zwift, the gym's app, a bike computer…).",
+                "NOOP looks for machines that broadcast the standard Bluetooth Fitness Machine service.",
+            ]
+        case .amazfit:
+            return [
+                "Wake your Amazfit / Zepp band and make sure it isn't connected to the Zepp app right now.",
+                "NOOP reads live heart rate when the band exposes it. Some bands need a pairing we can't do yet — if so, we'll say so honestly.",
+                "Experimental: this is best-effort. If live doesn't work, you can export from Zepp and import the file.",
+            ]
+        case .miBand:
+            return [
+                "Wake your Mi Band and make sure it isn't connected to the Mi Fitness / Zepp Life app right now.",
+                "NOOP reads live heart rate on bands that don't require pairing. Newer bands need an auth handshake we can't do yet.",
+                "Experimental: if your band needs pairing, we'll tell you honestly rather than show a fake reading.",
+            ]
+        case .garmin:
+            return GarminBroadcast.broadcastHint
+        case .oura:
+            return [
+                "The Oura ring is proprietary and only syncs to the Oura app, so there's no open live stream NOOP can read.",
+                "We'll scan for your ring and check its Bluetooth services so you can see we looked.",
+                "Then we'll point you at file import, which is the honest way to get your Oura data into NOOP.",
+            ]
+        }
+    }
+
+    /// SF Symbol for a device type — used on the prep step header.
+    private func typeIcon(_ t: DeviceType) -> String {
+        switch t {
+        case .whoop4, .whoop5mg: return "applewatch.side.right"
+        case .hrStrap:           return "heart.circle"
+        case .gymEquipment:      return "figure.run.treadmill"
+        case .amazfit:           return "waveform.path.ecg.rectangle"
+        case .miBand:            return "waveform.path.ecg"
+        case .garmin:            return "applewatch"
+        case .oura:              return "circle.circle"
         }
     }
 
@@ -312,16 +391,46 @@ struct AddDeviceWizard: View {
                 WhoopPickList(ble: model.ble) { strap in
                     pickedWhoop = strap
                     pickedStrap = nil
+                    pickedMachine = nil
+                    pickedHuami = nil
                     nameDraft = strap.name.isEmpty ? typeTitle(type) : strap.name
                     model.stopWhoopScan()
                     step = .confirm
                 } onRescan: {
                     model.presentWhoopScan(model: type.whoopModel ?? .whoop4)
                 }
+            } else if type == .gymEquipment {
+                FTMSPickList(scanner: ftmsScanner) { machine in
+                    pickedMachine = machine
+                    clearOtherPicks(except: .gymEquipment)
+                    nameDraft = machine.name
+                    ftmsScanner.stopScan()
+                    step = .confirm
+                } onRescan: {
+                    ftmsScanner.scan()
+                }
+            } else if type == .amazfit || type == .miBand {
+                // EXPERIMENTAL Huami pick list (Amazfit / Zepp / Mi Band).
+                HuamiPickList(scanner: huamiScanner) { dev in
+                    pickedHuami = dev
+                    clearOtherPicks(except: type)
+                    nameDraft = dev.name
+                    huamiScanner.stopScan()
+                    step = .confirm
+                } onRescan: {
+                    huamiScanner.scan()
+                }
+            } else if type == .oura {
+                // EXPERIMENTAL Oura probe — detect the ring, then show the honest dead-end + file import.
+                OuraPickList(scanner: ouraScanner) {
+                    ouraScanner.stopScan()
+                    onClose()   // there's nothing to add; the user heads to file import
+                }
             } else {
+                // Heart-rate strap AND Garmin (Broadcast HR is the standard 0x180D path).
                 HRPickList(scanner: hrScanner) { strap in
                     pickedStrap = strap
-                    pickedWhoop = nil
+                    clearOtherPicks(except: type ?? .hrStrap)
                     nameDraft = strap.name
                     hrScanner.stopScan()
                     step = .confirm
@@ -329,6 +438,18 @@ struct AddDeviceWizard: View {
                     hrScanner.scan()
                 }
             }
+        }
+    }
+
+    /// Clear every "picked" selection except the one for `keep`'s path, so re-entering the pick step or
+    /// switching device types never leaves a stale pick of another shape.
+    private func clearOtherPicks(except keep: DeviceType) {
+        if keep.isWhoop == false { pickedWhoop = nil }
+        switch keep {
+        case .hrStrap, .garmin:    pickedHuami = nil; pickedMachine = nil
+        case .gymEquipment:        pickedStrap = nil; pickedHuami = nil
+        case .amazfit, .miBand:    pickedStrap = nil; pickedMachine = nil
+        default:                   pickedStrap = nil; pickedMachine = nil; pickedHuami = nil
         }
     }
 
@@ -378,15 +499,21 @@ struct AddDeviceWizard: View {
     private var confirmAdvertisedName: String {
         if let pickedWhoop { return pickedWhoop.name.isEmpty ? (type.map(typeTitle) ?? "Device") : pickedWhoop.name }
         if let pickedStrap { return pickedStrap.name }
+        if let pickedMachine { return pickedMachine.name }
+        if let pickedHuami { return pickedHuami.name }
         return type.map(typeTitle) ?? "Device"
     }
     private var confirmBrand: String {
         if type?.isWhoop == true { return "WHOOP" }
+        if type == .gymEquipment { return "Gym equipment" }
+        if type == .amazfit { return "Amazfit" }
+        if type == .miBand { return "Mi Band" }
+        if type == .garmin { return "Garmin" }
         if let pickedStrap { return brandGuess(from: pickedStrap.name) }
         return "Heart-rate strap"
     }
     private var confirmRSSI: Int {
-        pickedWhoop?.rssi ?? pickedStrap?.rssi ?? -70
+        pickedWhoop?.rssi ?? pickedStrap?.rssi ?? pickedMachine?.rssi ?? pickedHuami?.rssi ?? -70
     }
 
     // MARK: Actions
@@ -399,22 +526,28 @@ struct AddDeviceWizard: View {
         case .confirm:
             // Re-enter the pick step and restart its scan so the user can choose a different device.
             if let type { startScan(for: type) }
-            pickedWhoop = nil; pickedStrap = nil
+            pickedWhoop = nil; pickedStrap = nil; pickedMachine = nil; pickedHuami = nil
             step = .pick
         }
     }
 
     private func startScan(for type: DeviceType) {
-        if type.isWhoop {
-            model.presentWhoopScan(model: type.whoopModel ?? .whoop4)
-        } else {
-            hrScanner.scan()
+        switch type {
+        case .whoop4, .whoop5mg: model.presentWhoopScan(model: type.whoopModel ?? .whoop4)
+        case .gymEquipment:      ftmsScanner.scan()
+        case .amazfit, .miBand:  huamiScanner.scan()
+        case .oura:              ouraScanner.scan()
+        // Heart-rate strap AND Garmin both use the standard 0x180D scanner (Garmin Broadcast HR).
+        case .hrStrap, .garmin:  hrScanner.scan()
         }
     }
 
     private func stopAllScans() {
         model.stopWhoopScan()
         hrScanner.stopScan()
+        ftmsScanner.stopScan()
+        huamiScanner.stopScan()
+        ouraScanner.stop()
     }
 
     /// Build the right `PairedDevice` for the chosen path, register it, optionally activate, then close.
@@ -438,15 +571,44 @@ struct AddDeviceWizard: View {
                 status: .paired,
                 addedAt: now, lastSeenAt: now)
         } else if let pickedStrap {
-            // Generic HR strap: HR + HRV only.
+            // Generic HR strap OR a Garmin broadcasting standard HR. Garmin is registered as a `.liveBLE`
+            // device (its live HR IS the standard 0x180D path) but branded "Garmin"; both are HR + HRV.
+            let isGarmin = type == .garmin
             device = PairedDevice(
-                id: "strap-\(pickedStrap.id.uuidString)",
-                brand: brandGuess(from: pickedStrap.name),
+                id: "\(isGarmin ? "garmin" : "strap")-\(pickedStrap.id.uuidString)",
+                brand: isGarmin ? "Garmin" : brandGuess(from: pickedStrap.name),
                 model: pickedStrap.name,
                 nickname: name == pickedStrap.name ? nil : name,
                 peripheralId: pickedStrap.id.uuidString,
                 sourceKind: .liveBLE,
                 capabilities: [.hr, .hrv],
+                status: .paired,
+                addedAt: now, lastSeenAt: now)
+        } else if let pickedHuami {
+            // EXPERIMENTAL Amazfit / Zepp / Mi Band. sourceKind `.huami` routes the SourceCoordinator to
+            // the HuamiHRSource. HR only (the Huami custom characteristic carries no R-R).
+            let brand = (type == .miBand) ? "Mi Band" : "Amazfit"
+            device = PairedDevice(
+                id: "huami-\(pickedHuami.id.uuidString)",
+                brand: brand,
+                model: pickedHuami.name,
+                nickname: name == pickedHuami.name ? nil : name,
+                peripheralId: pickedHuami.id.uuidString,
+                sourceKind: .huami,
+                capabilities: [.hr],
+                status: .paired,
+                addedAt: now, lastSeenAt: now)
+        } else if let pickedMachine {
+            // FTMS gym machine: a live machine + (when reported) HR session, recorded via the existing
+            // live-workout path. sourceKind `.ftms` routes the SourceCoordinator to the FTMSSource.
+            device = PairedDevice(
+                id: "ftms-\(pickedMachine.id.uuidString)",
+                brand: "Gym equipment",
+                model: pickedMachine.name,
+                nickname: name == pickedMachine.name ? nil : name,
+                peripheralId: pickedMachine.id.uuidString,
+                sourceKind: .ftms,
+                capabilities: [.hr],
                 status: .paired,
                 addedAt: now, lastSeenAt: now)
         } else {
@@ -461,10 +623,33 @@ struct AddDeviceWizard: View {
 
     private func typeTitle(_ t: DeviceType) -> String {
         switch t {
-        case .whoop5mg: return "WHOOP 5.0 / MG"
-        case .whoop4:   return "WHOOP 4.0"
-        case .hrStrap:  return "Heart-rate strap"
+        case .whoop5mg:     return "WHOOP 5.0 / MG"
+        case .whoop4:       return "WHOOP 4.0"
+        case .hrStrap:      return "Heart-rate strap"
+        case .gymEquipment: return "Gym equipment"
+        case .amazfit:      return "Amazfit / Zepp"
+        case .miBand:       return "Xiaomi Mi Band"
+        case .garmin:       return "Garmin watch"
+        case .oura:         return "Oura ring"
         }
+    }
+
+    /// A shared "this tier is experimental" note shown on the type list heading and every experimental
+    /// prep step. Honest, US-neutral, no em-dashes.
+    private var experimentalTierNote: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "flask")
+                .foregroundStyle(StrandPalette.statusWarning)
+                .accessibilityHidden(true)
+            Text("Experimental, best-effort support. We're still testing these, so they might not connect on every device. They never make up data, and they'll tell you honestly when live isn't possible.")
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.statusWarning)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(StrandPalette.statusWarning.opacity(0.10),
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private var experimentalNote: some View {
@@ -572,6 +757,98 @@ private struct HRPickList: View {
         if lower.contains("magene") { return "Magene" }
         if lower.contains("amazfit") || lower.contains("helio") || lower.contains("zepp") { return "Amazfit" }
         return "Heart-rate strap"
+    }
+}
+
+// MARK: - FTMS gym-equipment pick list (observes its own FTMSSource)
+
+private struct FTMSPickList: View {
+    @ObservedObject var scanner: FTMSSource
+    let onSelect: (FTMSSource.DiscoveredMachine) -> Void
+    let onRescan: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            ScanStatusBar(searching: scanner.scanning, onRescan: onRescan)
+            if scanner.discovered.isEmpty {
+                SearchingCard()
+            } else {
+                ForEach(scanner.discovered.sorted { $0.rssi > $1.rssi }) { machine in
+                    DiscoveredRow(name: machine.name,
+                                  subtitle: "Gym equipment",
+                                  rssi: machine.rssi) {
+                        onSelect(machine)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Huami experimental pick list (Amazfit / Zepp / Mi Band)
+
+private struct HuamiPickList: View {
+    @ObservedObject var scanner: HuamiHRSource
+    let onSelect: (HuamiHRSource.DiscoveredDevice) -> Void
+    let onRescan: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            ScanStatusBar(searching: scanner.scanning, onRescan: onRescan)
+            if scanner.discovered.isEmpty {
+                SearchingCard()
+            } else {
+                ForEach(scanner.discovered.sorted { $0.rssi > $1.rssi }) { dev in
+                    DiscoveredRow(name: dev.name, subtitle: "Experimental", rssi: dev.rssi) {
+                        onSelect(dev)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Oura experimental probe list (honest dead-end → file import)
+
+private struct OuraPickList: View {
+    @ObservedObject var scanner: OuraProbeSource
+    /// Tapped when the user accepts the dead-end and heads to file import (closes the wizard).
+    let onUseImport: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            ScanStatusBar(searching: scanner.scanning, onRescan: { scanner.scan() })
+            // Once we have a dead-end message (probed a ring, or couldn't), show it honestly.
+            if let msg = scanner.deadEndMessage {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "info.circle")
+                            .foregroundStyle(StrandPalette.statusWarning)
+                            .accessibilityHidden(true)
+                        Text(msg)
+                            .font(StrandFont.body)
+                            .foregroundStyle(StrandPalette.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Button("Use file import") { onUseImport() }
+                        .buttonStyle(.borderedProminent)
+                        .tint(StrandPalette.accent)
+                        .accessibilityLabel("Use file import for Oura")
+                }
+                .padding(16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frostedCardSurface(cornerRadius: 14)
+            } else if scanner.discovered.isEmpty {
+                SearchingCard()
+            } else {
+                // Found a ring (or rings): let the user pick one to probe so they see we genuinely looked.
+                ForEach(scanner.discovered.sorted { $0.rssi > $1.rssi }) { ring in
+                    DiscoveredRow(name: ring.name, subtitle: "Tap to check", rssi: ring.rssi) {
+                        scanner.probe(ring.id)
+                    }
+                }
+            }
+        }
     }
 }
 

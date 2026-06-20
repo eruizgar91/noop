@@ -7,7 +7,7 @@ enum AppChangelog {
 
     /// Bump this when you add a release below. The "What's New" sheet shows automatically when the
     /// stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
-    static let currentVersion = "5.3.0"
+    static let currentVersion = "6.0.0"
 
     struct Release: Identifiable {
         let version: String
@@ -19,6 +19,20 @@ enum AppChangelog {
 
     /// Newest first.
     static let releases: [Release] = [
+        Release(
+            version: "6.0.0",
+            title: "NOOP grows up: it's not just for WHOOP anymore",
+            date: "June 2026",
+            items: [
+                "**Your WHOOP is no longer the only thing that works.** NOOP now reads standard Bluetooth chest straps and arm bands (like the Polar H10) for live heart rate and HRV, connects to gym machines over the standard FTMS profile (treadmills, bikes, rowers, cross-trainers), and reads standard running and cycling sensors for live speed, cadence and power during a workout. Your WHOOP support is exactly as it was.",
+                "**Bring your history with you, fully offline.** Import your own data export from Oura, Fitbit or Garmin and NOOP pulls in sleep, resting heart rate, HRV and steps wherever the file has them. It never talks to their cloud, and their own readiness or sleep scores stay reference only. Your NOOP scores are recomputed from the raw signals, never copied. GPX, TCX and FIT workout files import too.",
+                "**Broadcast your heart rate out.** Turn on Broadcast in Data Sources and NOOP re-shares your strap's heart rate as a standard Bluetooth HR sensor, so a treadmill, Zwift or Peloton can read it. Local Bluetooth only, nothing leaves your device. Off by default.",
+                "**Experimental: more bands, and we need your help testing them.** A clearly-labeled Experimental tier in Add a device covers Amazfit / Zepp (Helio included), Xiaomi Mi Band, Garmin (via Broadcast HR) and an Oura ring probe. These are best-effort and can't be hardware-verified by us, so they're opt-in and honest about what they can do. None of them ever makes up a number. If you have one, turn it on and send us a debug log.",
+                "**GPS workout routes on iPhone and Mac.** Outdoor runs, rides, walks and hikes now record a route with distance, pace and a map, matching Android. Recording keeps going while the screen is off.",
+                "**Take a spot HRV reading any time**, plus a new **Recalibrate baselines** button in Settings to cleanly restart your Charge build-up if your first week got thrown off. Your history stays. And a simple **caffeine log** with a rough still-active estimate.",
+                "**Fixes you asked for.** Sleep totals now line up across every screen (your night is your night, naps sit on their own). A fresh or calibrating tile says \"building, wear it tonight\" instead of a bare dash. Manual workouts survive the app being killed mid-session. The WHOOP 4.0 scheduled alarm actually buzzes now (our packet was two bytes short), with per-weekday scheduling. Android can share metrics out to Health Connect.",
+                "Huge thanks to everyone who reverse-engineered, reported and tested their way into this one. A pile of 6.0 came straight from your issues and PRs.",
+            ]),
         Release(
             version: "5.3.0",
             title: "Sleep, Charge and workouts, cleaned up",

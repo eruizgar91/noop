@@ -114,4 +114,102 @@ final class SleepStageTotalsTests: XCTestCase {
         let after = try XCTUnwrap(AnalyticsEngine.Rest.composite(daily: daily(edited)))
         XCTAssertLessThan(after, before, "trimming sleep must lower the Rest composite")
     }
+
+    // MARK: - #525 canonical main-night selection (numbers reconcile across screens)
+
+    /// A "yyyy-MM-dd'T'HH:mm" UTC wall-clock as unix seconds. UTC offset 0 in these tests, so local == UTC.
+    private func ts525(_ iso: String) -> Int {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd'T'HH:mm"
+        return Int(f.date(from: iso)!.timeIntervalSince1970)
+    }
+
+    func testMainNightPrefersOvernightOverLongerDaytimeNap() {
+        let nightStart = ts525("2026-06-14T23:00")   // overnight onset
+        let napStart   = ts525("2026-06-15T13:00")   // daytime onset
+        // The nap is LONGER in clock span, but the overnight block must still win.
+        let blocks = [
+            SleepStageTotals.NightBlock(start: napStart,   end: napStart + 5 * 3600),  // 5h daytime
+            SleepStageTotals.NightBlock(start: nightStart, end: nightStart + 4 * 3600), // 4h overnight
+        ]
+        XCTAssertEqual(SleepStageTotals.mainNightIndex(blocks, offsetSec: 0), 1,
+                       "the overnight block is the main night even when a nap is longer")
+    }
+
+    func testMainNightLongestAmongOvernightBlocks() {
+        let a = ts525("2026-06-14T22:00")
+        let b = ts525("2026-06-14T23:30")
+        let blocks = [
+            SleepStageTotals.NightBlock(start: a, end: a + 3 * 3600),  // 3h
+            SleepStageTotals.NightBlock(start: b, end: b + 6 * 3600),  // 6h — longer overnight wins
+        ]
+        XCTAssertEqual(SleepStageTotals.mainNightIndex(blocks, offsetSec: 0), 1)
+    }
+
+    func testMainNightEmptyAndTieAreDeterministic() {
+        XCTAssertNil(SleepStageTotals.mainNightIndex([], offsetSec: 0))
+        // Two equal-length overnight blocks → the EARLIER onset wins (stable across platforms).
+        let a = ts525("2026-06-14T22:00"), b = ts525("2026-06-14T23:00")
+        let blocks = [
+            SleepStageTotals.NightBlock(start: b, end: b + 4 * 3600),
+            SleepStageTotals.NightBlock(start: a, end: a + 4 * 3600),
+        ]
+        XCTAssertEqual(SleepStageTotals.mainNightIndex(blocks, offsetSec: 0), 1, "earlier onset breaks the tie")
+    }
+
+    /// THE #525 invariant: a day with an overnight + a nap reports CONSISTENT totals — the day's
+    /// canonical figure equals the MAIN NIGHT's sleep, NOT the night+nap sum. The honoring-edits seam
+    /// (with onsets supplied) and the standalone main-night aggregate agree to the minute.
+    func testOvernightPlusNapReportsConsistentTotalsNotTheSum() throws {
+        let nightStart = ts525("2026-06-14T23:00")
+        let napStart   = ts525("2026-06-15T14:00")
+        let nightStages = #"{"awake":24,"light":214,"deep":82,"rem":96}"#   // 392 min asleep
+        let napStages   = #"{"awake":2,"light":30,"deep":10,"rem":8}"#      // 48 min asleep
+
+        // What the Sleep tab's hero shows for this day = the main night's own aggregate.
+        let mainOnly = try XCTUnwrap(SleepStageTotals.dailyAggregate([nightStages]))
+        XCTAssertEqual(mainOnly.totalSleepMin, 392, accuracy: 0.001)
+
+        // The honoring-edits seam (no edits, but onsets supplied) must report the SAME main-night total,
+        // never the 392 + 48 = 440 sum the old code produced.
+        let r = try XCTUnwrap(SleepStageTotals.dailyAggregateHonoringEdits(
+            detected: [(startTs: nightStart, stagesJSON: nightStages),
+                       (startTs: napStart,   stagesJSON: napStages)],
+            edited: [:],
+            onsetByStart: [nightStart: nightStart, napStart: napStart],
+            offsetSec: 0))
+        XCTAssertFalse(r.editApplied)
+        XCTAssertEqual(r.sleep.totalSleepMin, mainOnly.totalSleepMin, accuracy: 0.001,
+                       "day total must equal the MAIN night, not the night+nap sum")
+        XCTAssertEqual(r.sleep.deepMin, mainOnly.deepMin, accuracy: 0.001)
+        XCTAssertEqual(r.sleep.remMin, mainOnly.remMin, accuracy: 0.001)
+        XCTAssertNotEqual(r.sleep.totalSleepMin, 440, accuracy: 0.001, "must NOT sum the nap in")
+    }
+
+    /// A hand-corrected (trimmed) main night still wins the pick, and the day total tracks the EDITED
+    /// main night — the nap is never folded into the headline figure.
+    func testHonoringEditsMainNightModeTracksEditedNightNotNapSum() throws {
+        let nightStart = ts525("2026-06-14T23:00")
+        let napStart   = ts525("2026-06-15T14:00")
+        let r = try XCTUnwrap(SleepStageTotals.dailyAggregateHonoringEdits(
+            detected: [(startTs: nightStart, stagesJSON: #"{"awake":24,"light":214,"deep":82,"rem":96}"#),
+                       (startTs: napStart,   stagesJSON: #"{"awake":2,"light":30,"deep":10,"rem":8}"#)],
+            edited: [nightStart: #"{"awake":0,"light":118,"deep":82,"rem":96}"#],   // trimmed to 296
+            onsetByStart: [nightStart: nightStart, napStart: napStart],
+            offsetSec: 0))
+        XCTAssertTrue(r.editApplied)
+        XCTAssertEqual(r.sleep.totalSleepMin, 296, accuracy: 0.001,
+                       "day total tracks the EDITED main night, nap excluded from the headline figure")
+    }
+
+    /// Backward-compat: with NO onsets supplied the seam keeps the legacy sum-of-all-blocks total, so
+    /// any caller still on the old signature is unchanged.
+    func testHonoringEditsLegacySumWhenNoOnsets() throws {
+        let r = try XCTUnwrap(SleepStageTotals.dailyAggregateHonoringEdits(
+            detected: [(startTs: 100,  stagesJSON: #"{"awake":2,"light":30,"deep":10,"rem":8}"#),
+                       (startTs: 1000, stagesJSON: #"{"awake":24,"light":214,"deep":82,"rem":96}"#)],
+            edited: [:]))
+        XCTAssertEqual(r.sleep.totalSleepMin, 48 + 392, accuracy: 0.001, "no onsets → legacy sum")
+    }
 }

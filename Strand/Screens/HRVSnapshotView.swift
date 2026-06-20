@@ -24,6 +24,11 @@ struct HRVSnapshotView: View {
     /// Optional dismissal hook when presented as a sheet (Live → "Take an HRV reading").
     var onClose: (() -> Void)? = nil
 
+    /// Where the live R-R is coming from, so the methodology caveat is honest (#537): a WHOOP 5/MG
+    /// derives R-R from the optical pulse signal (noisier) while a WHOOP 4 / chest strap is electrical
+    /// R-R. Defaults to `.unknown` for callers that do not pass a strap model, matching the Android twin.
+    var source: SpotHrvReading.Source = .unknown
+
     // MARK: - Capture phase
 
     private enum Phase: Equatable {
@@ -333,11 +338,19 @@ struct HRVSnapshotView: View {
 
     // MARK: - Methodology
 
+    /// Source-aware methodology (#537): the first line states the spot RMSSD uses the SAME cleaned
+    /// Task-Force math as the nightly HRV (so the number is comparable to your overnight figure), then
+    /// `SpotHrvReading.caveatFor` adds the honest limits — including the noisier optical-PPG note on a
+    /// WHOOP 5/MG. Single-sourced with Android via the shared helper, no em-dashes.
     private var methodologyCard: some View {
         StrandCard(tint: StrandPalette.restColor) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("How this is measured").strandOverline()
-                Text("A 60-second snapshot of your beat-to-beat (R-R) intervals from the strap, cleaned (range + ectopic-beat filtering) before computing RMSSD. It's an honest spot reading, not a clinical measurement — take it seated, still, and at a consistent time of day for comparable numbers.")
+                Text("A 60-second snapshot of your beat-to-beat (R-R) intervals from the strap, cleaned (range and ectopic-beat filtering) before computing RMSSD the same way your overnight HRV is computed.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(SpotHrvReading.caveatFor(source))
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -12,15 +12,18 @@ public struct ImportCoordinator {
     private let appleHealth: AppleHealthImporter
     private let whoop: WhoopExportImporter
     private let xiaomi: XiaomiBandImporter
+    private let wearable: WearableExportImporter
 
     public init(
         appleHealth: AppleHealthImporter = AppleHealthImporter(),
         whoop: WhoopExportImporter = WhoopExportImporter(),
-        xiaomi: XiaomiBandImporter = XiaomiBandImporter()
+        xiaomi: XiaomiBandImporter = XiaomiBandImporter(),
+        wearable: WearableExportImporter = WearableExportImporter()
     ) {
         self.appleHealth = appleHealth
         self.whoop = whoop
         self.xiaomi = xiaomi
+        self.wearable = wearable
     }
 
     // MARK: - Explicit-kind entry points
@@ -55,6 +58,12 @@ public struct ImportCoordinator {
         try xiaomi.import(from: url)
     }
 
+    /// Parse a user's own Oura / Fitbit / Garmin data export (a `.json`, a folder, or a `.zip`).
+    /// The brand is auto-detected by content.
+    public func importWearableExport(from url: URL) throws -> WearableImportResult {
+        try wearable.import(from: url)
+    }
+
     // MARK: - Auto-detecting entry point
 
     /// The detected kind plus exactly one of the two result payloads.
@@ -62,12 +71,14 @@ public struct ImportCoordinator {
         case appleHealth(AppleHealthImportResult)
         case whoopExport(WhoopImportResult)
         case xiaomiBand(XiaomiImportResult)
+        case wearable(WearableImportResult)
 
         public var kind: DataSourceKind {
             switch self {
             case .appleHealth: return .appleHealth
             case .whoopExport: return .whoopExport
             case .xiaomiBand: return .xiaomiBand
+            case .wearable(let r): return r.brand.dataSourceKind
             }
         }
 
@@ -76,6 +87,7 @@ public struct ImportCoordinator {
             case .appleHealth(let r): return r.summary
             case .whoopExport(let r): return r.summary
             case .xiaomiBand(let r): return r.summary
+            case .wearable(let r): return r.summary
             }
         }
     }
@@ -88,13 +100,28 @@ public struct ImportCoordinator {
     ///   CSVs) → Whoop export.
     /// - A folder/zip containing `export.xml` → Apple Health.
     public func detectAndImport(from url: URL) throws -> DetectedImport {
-        switch try detectKind(of: url) {
+        // The three first-party exports have distinctive structural markers; try them first.
+        let kind: DataSourceKind
+        do {
+            kind = try detectKind(of: url)
+        } catch ImportError.notAZipOrFolder {
+            // A readable file with no first-party marker: hand it to the Oura/Fitbit/Garmin wearable
+            // export importer, which sniffs the brand by content. ONLY this case falls through. A
+            // genuinely missing file (fileNotFound) or any other structural error is re-thrown so the
+            // user sees the real problem instead of a misleading "not an Oura/Fitbit/Garmin export".
+            return .wearable(try wearable.import(from: url))
+        }
+        switch kind {
         case .appleHealth:
             return .appleHealth(try appleHealth.import(from: url))
         case .whoopExport:
             return .whoopExport(try whoop.import(from: url))
         case .xiaomiBand:
             return .xiaomiBand(try xiaomi.import(from: url))
+        // detectKind never returns the wearable-import kinds (it has no marker for them) — the wearable
+        // importer owns brand detection. Unreachable but kept exhaustive.
+        case .ouraImport, .fitbitImport, .garminImport:
+            return .wearable(try wearable.import(from: url))
         }
     }
 

@@ -60,6 +60,9 @@ private struct DevicesContent: View {
                     device: device,
                     isActive: device.status == .active,
                     isLiveConnected: device.status == .active && live.connected,
+                    // The live battery belongs to whichever device is ACTIVE + connected (the WHOOP, a
+                    // generic strap, or an FTMS machine all funnel into live.batteryPct). nil otherwise.
+                    liveBatteryPct: (device.status == .active && live.connected) ? live.batteryPct.map { Int($0.rounded()) } : nil,
                     onMakeActive: { switchTarget = device },
                     onRename: { renameDraft = device.nickname ?? device.displayName; renameTarget = device },
                     onRemove: { removeTarget = device })
@@ -224,6 +227,10 @@ private struct DeviceCard: View {
     let device: PairedDevice
     let isActive: Bool
     let isLiveConnected: Bool
+    /// The active+connected device's live battery percent (0–100), surfaced on the card the same way
+    /// for WHOOP, a generic strap, or an FTMS machine. nil when not the active/connected device or
+    /// the source hasn't reported a battery (e.g. a strap/machine without the 0x180F service).
+    var liveBatteryPct: Int? = nil
     var dimmed: Bool = false
     var onMakeActive: () -> Void
     var onRename: () -> Void
@@ -273,6 +280,15 @@ private struct DeviceCard: View {
                     Text(lastSeenLine)
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textTertiary)
+                    // Live battery for the active+connected device — same surface for WHOOP / strap / FTMS.
+                    if let pct = liveBatteryPct {
+                        Text("·").font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                        Label("\(pct)%", systemImage: batterySymbol(pct))
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                            .labelStyle(.titleAndIcon)
+                            .accessibilityLabel("Battery \(pct) percent")
+                    }
                     Spacer()
                     actionsMenu
                 }
@@ -330,9 +346,12 @@ private struct DeviceCard: View {
         .accessibilityLabel("Device actions for \(device.displayName)")
     }
 
-    /// SF Symbol for the device: WHOOP keeps the band glyph; generic straps read as a heart-rate strap.
+    /// SF Symbol for the device: WHOOP keeps the band glyph; an FTMS machine reads as gym equipment;
+    /// generic straps read as a heart-rate strap.
     private var icon: String {
-        SourceCoordinator.isWhoop(device) ? "applewatch.side.right" : "heart.circle"
+        if device.sourceKind == .ftms { return "figure.run.treadmill" }
+        if device.sourceKind == .huami { return "waveform.path.ecg.rectangle" }
+        return SourceCoordinator.isWhoop(device) ? "applewatch.side.right" : "heart.circle"
     }
 
     /// The honest, per-model capability + function summary for this device's card.
@@ -358,6 +377,17 @@ private struct DeviceCard: View {
         if isLiveConnected { return "Connected now" }
         return "Last seen \(relativeAgo(TimeInterval(device.lastSeenAt)))"
     }
+
+    /// A battery SF Symbol matching the charge band (mirrors the menu-bar battery glyph buckets).
+    private func batterySymbol(_ pct: Int) -> String {
+        switch pct {
+        case ..<13:  return "battery.0"
+        case ..<38:  return "battery.25"
+        case ..<63:  return "battery.50"
+        case ..<88:  return "battery.75"
+        default:     return "battery.100"
+        }
+    }
 }
 
 // MARK: - Capability profile
@@ -378,6 +408,24 @@ struct DeviceCapabilityProfile {
     let footnote: String       // one short honest caveat line ("*" estimates + the SpO₂/steps notes)
 
     static func make(for d: PairedDevice) -> DeviceCapabilityProfile {
+        // FTMS gym machine: a live machine + (when reported) HR session, recorded via the existing
+        // live-workout path. Honest — we surface the machine's metrics + HR live; the session is
+        // Effort-scored only when the machine actually reports heart rate.
+        if d.sourceKind == .ftms {
+            return DeviceCapabilityProfile(
+                displayModel: "Gym equipment (FTMS)",
+                captures: "Speed · Cadence · Power · Distance · Energy · Heart rate (if the machine sends it)",
+                powers: "Records a live machine workout — Effort-scored from HR when the machine reports it",
+                footnote: "Live machine data over Bluetooth FTMS. No sleep, recovery, skin temp or SpO₂. Effort needs the machine's heart rate; without it the session logs the machine metrics only.")
+        }
+        // EXPERIMENTAL Huami device (Amazfit / Zepp / Mi Band): best-effort live HR only, honest about it.
+        if d.sourceKind == .huami {
+            return DeviceCapabilityProfile(
+                displayModel: "\(d.brand) (experimental)",
+                captures: "Heart rate (live, best-effort)",
+                powers: "Powers the live console + Effort — no Charge, Rest or Sleep",
+                footnote: "Experimental: live heart rate where the band exposes it. Some bands need a pairing we can't do yet — NOOP will say so honestly and never show a made-up number. No sleep, recovery, skin temp, SpO₂ or steps.")
+        }
         // Generic heart-rate strap: live HR + R-R only; drives the live console + Effort, nothing nightly.
         // (Same WHOOP test as SourceCoordinator.isWhoop, inlined so this stays nonisolated.)
         let isWhoop = d.id == "my-whoop" || d.brand.caseInsensitiveCompare("WHOOP") == .orderedSame

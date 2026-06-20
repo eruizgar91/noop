@@ -113,9 +113,13 @@ object IntelligenceEngine {
         // analytics layer is Context-free, so the caller reads it from SharedPreferences and passes it
         // down to the HRV foldHistory. Default 0.0 → no recalibration, so other callers are unaffected.
         baselineEpoch: Double = 0.0,
+        // The Charge-wide recalibration anchor (noop.recoveryBaselineEpoch); re-anchors resting HR / resp /
+        // skin-temp the same way baselineEpoch re-anchors HRV, so a manual Recalibrate restarts all of
+        // Charge. Read from SharedPreferences by the caller. Default 0.0 → no recalibration.
+        recoveryEpoch: Double = 0.0,
     ): List<Computed> = withContext(Dispatchers.Default) {
         analyzeRecentOnCpu(repo, profile, maxDays, importedDeviceId, maxHROverride, nowSeconds,
-            ownerSource, manualStepCoefficient, persistStepsCalibration, baselineEpoch)
+            ownerSource, manualStepCoefficient, persistStepsCalibration, baselineEpoch, recoveryEpoch)
     }
 
     /** History span for the one-shot Effort rescore — large enough to cover any real wear history,
@@ -171,6 +175,7 @@ object IntelligenceEngine {
         manualStepCoefficient: Double? = null,
         persistStepsCalibration: (StepsEstimateEngine.Calibration) -> Unit = {},
         baselineEpoch: Double = 0.0,
+        recoveryEpoch: Double = 0.0,
     ): List<Computed> {
         val hrvCfg = Baselines.metricCfg["hrv"] ?: return emptyList()
         val rhrCfg = Baselines.metricCfg["resting_hr"] ?: return emptyList()
@@ -209,7 +214,7 @@ object IntelligenceEngine {
         // the epoch. baselineEpoch is threaded down from the Context-aware caller (0.0 = no recalibration).
         // rhr/resp/skin stay on the 2-arg fold — recalibration is HRV-only.
         val hrvBase1 = Baselines.foldHistory(hist.map { it.avgHrv }, hist.map { it.day }, hrvCfg, baselineEpoch)
-        val rhrBase1 = Baselines.foldHistory(hist.map { it.restingHr?.toDouble() }, rhrCfg)
+        val rhrBase1 = Baselines.foldHistory(hist.map { it.restingHr?.toDouble() }, hist.map { it.day }, rhrCfg, recoveryEpoch)
         val baselines1 = ProfileBaselines(hrv = hrvBase1, restingHR = rhrBase1)
 
         // Keep each night's small DayResult (daily metrics + detected sessions), NOT the raw
@@ -351,26 +356,33 @@ object IntelligenceEngine {
         val hrvSorted = histHrvByDay.entries.sortedBy { it.key }
         val hrvSeq = hrvSorted.map { it.value }
         val hrvDayKeys = hrvSorted.map { it.key }
-        val rhrSeq = histRhrByDay.entries.sortedBy { it.key }.map { it.value }
-        val respSeq = histRespByDay.entries.sortedBy { it.key }.map { it.value }
-        // HRV baseline honours the manual recalibration epoch via the parallel day keys (0.0 = none).
-        // rhr/resp/skin stay on the 2-arg fold — recalibration is HRV-only.
+        val rhrSorted = histRhrByDay.entries.sortedBy { it.key }
+        val rhrSeq = rhrSorted.map { it.value }
+        val rhrDayKeys = rhrSorted.map { it.key }
+        val respSorted = histRespByDay.entries.sortedBy { it.key }
+        val respSeq = respSorted.map { it.value }
+        val respDayKeys = respSorted.map { it.key }
+        // HRV baseline honours noop.hrvBaselineEpoch; rhr/resp/skin honour noop.recoveryBaselineEpoch via
+        // their parallel day keys, so the manual Recalibrate restarts the whole Charge build-up together.
+        // A 0.0 epoch is byte-identical to the plain fold, so scoring is unchanged until the user taps it.
         val hrvBase2 = Baselines.foldHistory(hrvSeq, hrvDayKeys, hrvCfg, baselineEpoch)
-        val rhrBase2 = Baselines.foldHistory(rhrSeq, rhrCfg)
+        val rhrBase2 = Baselines.foldHistory(rhrSeq, rhrDayKeys, rhrCfg, recoveryEpoch)
         // Resp baseline mixes imported (cloud) values with on-device RSA estimates — acceptable: the
         // z-score is scale-tolerant, foldHistory winsorizes, and respRateBpm already carries no source
         // flag anywhere else (the illness gate treats it the same way). Gated on `usable` because
         // RecoveryScorer includes the resp term whenever a baseline object is present — a CALIBRATING
         // (<4-night) baseline would let one noisy RSA night move recovery (mirrors the skin-temp
         // use-site gate; honest cold-start).
-        val respBase2 = Baselines.foldHistory(respSeq, respCfg).takeIf { it.usable }
+        val respBase2 = Baselines.foldHistory(respSeq, respDayKeys, respCfg, recoveryEpoch).takeIf { it.usable }
         // Skin-temp baseline is on-device-only (imported rows carry skinTempDevC, not the raw mean),
         // so fold purely over the pass-1 nightly means in chronological order. (PR #85)
         // Gated on `usable` for consistency with the resp baseline above AND the Swift reference
         // (IntelligenceEngine.swift:162 `skinFold.usable ? skinFold : nil`) — the use-site re-checks
         // `usable` too, so this is belt-and-suspenders, but it keeps the platforms byte-aligned.
-        val skinSeq = nightlySkinByDay.entries.sortedBy { it.key }.map { it.value }
-        val skinBase2 = Baselines.foldHistory(skinSeq, skinCfg).takeIf { it.usable }
+        val skinSorted = nightlySkinByDay.entries.sortedBy { it.key }
+        val skinSeq = skinSorted.map { it.value }
+        val skinDayKeys = skinSorted.map { it.key }
+        val skinBase2 = Baselines.foldHistory(skinSeq, skinDayKeys, skinCfg, recoveryEpoch).takeIf { it.usable }
         val baselines2 = ProfileBaselines(
             hrv = hrvBase2, restingHR = rhrBase2, resp = respBase2, skinTemp = skinBase2,
         )
@@ -428,7 +440,7 @@ object IntelligenceEngine {
         for (res in scoredNights) {
             // Substitute an edited block's (reshaped) stages for its detected twin before the daily
             // sleep aggregate feeds Rest + recovery. No edit touching this night → `daily` is unchanged.
-            val daily = sleepEditedDaily(res.daily, res.sleepSessions, editsByStart)
+            val daily = sleepEditedDaily(res.daily, res.sleepSessions, editsByStart, tzOffsetSeconds)
             val recovery = recomputeRecovery(daily, baselines2)
             val skinTempDevC = recomputeSkinTempDev(res.nightlySkinTempC, baselines2.skinTemp)
             RestScorer.restFromDaily(daily)?.let { rest ->
@@ -709,15 +721,25 @@ object IntelligenceEngine {
         daily: DailyMetric,
         detected: List<DetectedSleep>,
         editsByStart: Map<Long, String?>,
+        tzOffsetSeconds: Long,
     ): DailyMetric {
         if (editsByStart.isEmpty()) return daily
         // Match the Swift seam: detected blocks keyed by their stable startTs + their re-encoded stages.
         val detectedTuples = detected.map { it.start to AnalyticsEngine.encodeStages(it.stages) }
-        // A hand-logged nap is a userEdited row with NO detected twin — pass those twinless rows
-        // through the union channel so their minutes fold into the day's Rest total. (#518/#508)
+        // A hand-logged nap is a userEdited row with NO detected twin — pass those twinless rows through
+        // the union channel so the seam KNOWS about them (they stay their own session row, shown
+        // separately; the main-night pick below decides the headline total). (#518/#508)
         val detectedStarts = detected.map { it.start }.toHashSet()
         val manual = editsByStart.filter { it.key !in detectedStarts }.map { it.key to it.value }
-        val r = SleepStageTotals.dailyAggregateHonoringEdits(detectedTuples, editsByStart, manual) ?: return daily
+        // #525: supply each block's onset (its start key; a wake/bed edit moves end, not the onset) + the
+        // device tz offset so the edited recompute picks the MAIN NIGHT, exactly like analyzeDay. Without
+        // these the seam falls back to the legacy SUM and editing a block on an overnight+nap day would
+        // re-include the nap in the headline total, disagreeing with the non-edited daily figure.
+        val editStarts = detectedTuples.map { it.first } + manual.map { it.first }
+        val onsetByStart = editStarts.associateWith { it }
+        val r = SleepStageTotals.dailyAggregateHonoringEdits(
+            detectedTuples, editsByStart, manual, onsetByStart, tzOffsetSeconds,
+        ) ?: return daily
         if (!r.editApplied) return daily
         val agg = r.sleep
         // Substitute ONLY the sleep-derived fields; every non-sleep field is left untouched.

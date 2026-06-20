@@ -116,12 +116,14 @@ final class IntelligenceEngine: ObservableObject {
         // refresh last ran (4000 vs 120 days). This mirrors the Android port's `days(importedDeviceId)`.
         let hist = ((try? await store.dailyMetrics(deviceId: deviceId, from: "0000-01-01", to: "9999-12-31")) ?? [])
             .sorted { $0.day < $1.day }
-        // HRV baseline honours the manual "Recalibrate baseline" epoch (noop.hrvBaselineEpoch): pass the
+        // HRV baseline honours the manual "Recalibrate baseline" epoch (noop.hrvBaselineEpoch); the
+        // resting-HR baseline honours the Charge-wide sibling (noop.recoveryBaselineEpoch). Pass the
         // per-value "yyyy-MM-dd" day keys (parallel to the values) so foldHistory can drop every night
-        // before the epoch. baselineEpoch defaults to nil → the overload auto-reads UserDefaults. rhr/resp/
-        // skin stay on the plain foldHistory (recalibration is HRV-only).
+        // before the epoch. A 0 / absent epoch makes this byte-identical to the plain fold, so scoring is
+        // unchanged until the user taps Recalibrate.
         let hrvBase1 = Baselines.foldHistory(hist.map { $0.avgHrv }, dayKeys: hist.map { $0.day }, cfg: hrvCfg)
-        let rhrBase1 = Baselines.foldHistory(hist.map { $0.restingHr.map(Double.init) }, cfg: rhrCfg)
+        let rhrBase1 = Baselines.foldHistory(hist.map { $0.restingHr.map(Double.init) }, dayKeys: hist.map { $0.day },
+                                             cfg: rhrCfg, baselineEpoch: Baselines.recoveryBaselineEpoch())
         let baselines1 = AnalyticsEngine.ProfileBaselines(hrv: hrvBase1, restingHR: rhrBase1)
 
         // Keep each night's small result (daily metrics + sessions), NOT the raw streams — every field
@@ -243,26 +245,33 @@ final class IntelligenceEngine: ObservableObject {
         for (day, v) in nightlyHrvByDay where histHrvByDay[day] == nil { histHrvByDay[day] = v }
         for (day, v) in nightlyRhrByDay where histRhrByDay[day] == nil { histRhrByDay[day] = v }
         for (day, v) in nightlyRespByDay where histRespByDay[day] == nil { histRespByDay[day] = v }
+        // rhr/resp/skin honour the Charge-wide recalibration epoch (noop.recoveryBaselineEpoch); 0 = no-op,
+        // so this is byte-identical to the plain fold until the user taps Recalibrate, at which point the
+        // whole Charge build-up (HRV + resting HR + resp + skin) re-anchors together.
+        let recoveryEpoch = Baselines.recoveryBaselineEpoch()
         let hrvDayKeys = histHrvByDay.keys.sorted()                         // chronological "yyyy-MM-dd"
         let hrvSeq = hrvDayKeys.map { histHrvByDay[$0]! }                   // chronological [Double?]
-        let rhrSeq = histRhrByDay.keys.sorted().map { histRhrByDay[$0]! }
-        let respSeq = histRespByDay.keys.sorted().map { histRespByDay[$0]! }
+        let rhrDayKeys = histRhrByDay.keys.sorted()
+        let rhrSeq = rhrDayKeys.map { histRhrByDay[$0]! }
+        let respDayKeys = histRespByDay.keys.sorted()
+        let respSeq = respDayKeys.map { histRespByDay[$0]! }
         // Skin-temp baseline is on-device-only (imported rows carry skinTempDevC, not the raw mean),
         // so fold purely over the pass-1 nightly means in chronological order.
-        let skinSeq = nightlySkinByDay.keys.sorted().map { nightlySkinByDay[$0]! }
+        let skinDayKeys = nightlySkinByDay.keys.sorted()
+        let skinSeq = skinDayKeys.map { nightlySkinByDay[$0]! }
         // Resp baseline gated on `usable`: RecoveryScorer includes the resp term whenever a
         // baseline object is present — a CALIBRATING (<4-night) baseline would let one noisy
         // RSA night move recovery (mirrors the skin-temp use-site gate; honest cold-start).
-        let respFold = Baselines.foldHistory(respSeq, cfg: respCfg)
+        let respFold = Baselines.foldHistory(respSeq, dayKeys: respDayKeys, cfg: respCfg, baselineEpoch: recoveryEpoch)
         // Skin-temp gated the same way for consistency: its only use-site re-checks `.usable`
         // (AnalyticsEngine's skinTempDevC guard) so this is belt-and-suspenders, but it stops a
         // future use-site from trusting a CALIBRATING baseline. (PR #97 review.)
-        let skinFold = Baselines.foldHistory(skinSeq, cfg: skinCfg)
+        let skinFold = Baselines.foldHistory(skinSeq, dayKeys: skinDayKeys, cfg: skinCfg, baselineEpoch: recoveryEpoch)
         let baselines2 = AnalyticsEngine.ProfileBaselines(
-            // HRV baseline honours the manual recalibration epoch via the parallel day keys (baselineEpoch
-            // defaults to nil → auto-reads UserDefaults). rhr/resp/skin stay on the plain fold (HRV-only).
+            // HRV honours noop.hrvBaselineEpoch; rhr/resp/skin honour noop.recoveryBaselineEpoch via their
+            // parallel day keys, so the manual Recalibrate restarts the whole Charge build-up together.
             hrv: Baselines.foldHistory(hrvSeq, dayKeys: hrvDayKeys, cfg: hrvCfg),
-            restingHR: Baselines.foldHistory(rhrSeq, cfg: rhrCfg),
+            restingHR: Baselines.foldHistory(rhrSeq, dayKeys: rhrDayKeys, cfg: rhrCfg, baselineEpoch: recoveryEpoch),
             resp: respFold.usable ? respFold : nil,
             skinTemp: skinFold.usable ? skinFold : nil)
 
@@ -609,9 +618,17 @@ final class IntelligenceEngine: ObservableObject {
         let manualTuples = editsByStart
             .filter { !detectedStarts.contains($0.key) }
             .map { (startTs: $0.key, stagesJSON: $0.value.stagesJSON) }
+        // #525: supply each block's onset (its start key; a wake/bed edit moves end, not the onset) + the
+        // device tz offset so the edited recompute picks the MAIN NIGHT, exactly like analyzeDay. Without
+        // these the seam falls back to the legacy SUM and editing a block on an overnight+nap day would
+        // re-include the nap in the headline total, disagreeing with the non-edited daily figure.
+        let editStartTs = detectedTuples.map { $0.startTs } + manualTuples.map { $0.startTs }
+        let onsetByStart = Dictionary(editStartTs.map { ($0, $0) }, uniquingKeysWith: { a, _ in a })
         guard let r = SleepStageTotals.dailyAggregateHonoringEdits(detected: detectedTuples,
                                                                    edited: editedStages,
-                                                                   manual: manualTuples),
+                                                                   manual: manualTuples,
+                                                                   onsetByStart: onsetByStart,
+                                                                   offsetSec: TimeZone.current.secondsFromGMT()),
               r.editApplied else { return daily }
         let agg = r.sleep
         return daily.with(totalSleepMin: agg.totalSleepMin, efficiency: agg.efficiency,

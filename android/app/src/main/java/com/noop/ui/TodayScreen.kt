@@ -585,6 +585,7 @@ fun TodayScreen(
             estimatedStepsForDay = stepsEstForDay,
             restScore = restScoreForDay,
             enabledMetrics = enabledKeyMetrics,
+            isToday = selectedDayOffset == 0,
             onScoreInfo = openGuide,
         )
         HeartRateTrendCard(viewModel, days, selectedDay, todayDate, displayMetric, effortScale)
@@ -1148,7 +1149,33 @@ private fun SynthesisHeroCard(
     recoveryCalibration: Int?,
 ) {
     val recovery = day?.recovery
-    Box(modifier = Modifier.fillMaxWidth()) {
+    Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(Metrics.gap)) {
+        // The greeting + SOLID/CALIBRATING data-confidence pill ride in their OWN header row ABOVE the
+        // card, not as a top-end overlay over it (#527). The old overlay sat over the card's "SYNTHESIS"
+        // overline + big status word and, on a narrow phone, collided with them — and squeezing the
+        // status into the leftover width force-broke a single word ("Calibrating" → "Calibrati/ng").
+        // A separate row CAN'T overlap, and the card keeps its FULL width so the status stays one line.
+        // Mirrors the iOS Synthesis header-row layout (TodayView heroSection).
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // The greeting yields/ellipsises first; the pill keeps its full width (#527).
+            Text(
+                greetingWord(),
+                style = NoopType.subhead,
+                color = Palette.textSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            Spacer(Modifier.weight(1f))
+            StatePill(
+                title = if (recovery != null) "SOLID" else "CALIBRATING",
+                tone = if (recovery != null) StrandTone.Accent else StrandTone.Neutral,
+            )
+        }
         InsightCard(
             modifier = Modifier.fillMaxWidth(),
             category = "Synthesis",
@@ -1161,19 +1188,6 @@ private fun SynthesisHeroCard(
             statusColor = recovery?.let { Palette.recoveryColor(it) } ?: Palette.textTertiary,
             tint = Palette.gold,
         )
-        Row(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(18.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(greetingWord(), style = NoopType.subhead, color = Palette.textSecondary)
-            StatePill(
-                title = if (recovery != null) "SOLID" else "CALIBRATING",
-                tone = if (recovery != null) StrandTone.Accent else StrandTone.Neutral,
-            )
-        }
     }
 }
 
@@ -1402,6 +1416,7 @@ private fun MetricGrid(
     estimatedStepsForDay: Int? = null,
     restScore: Double? = null,
     enabledMetrics: List<KeyMetric> = KeyMetric.defaultOrder,
+    isToday: Boolean = false,
     onScoreInfo: (ScoreSection) -> Unit = {},
 ) {
     // One builder per tile, keyed by KeyMetric so the grid can be filtered + reordered per the saved
@@ -1423,11 +1438,14 @@ private fun MetricGrid(
             )
         },
         KeyMetric.EFFORT to { m ->
+            // Unscored TODAY → a short "building" hint instead of the "of N" axis caption, so a fresh
+            // user reads "coming" not "broken" (#527); a scored day keeps "of N", a past day stays bare.
             SparkStatTile(
                 modifier = m,
                 label = "Effort",
                 value = d?.strain?.let { UnitFormatter.effortDisplay(it, effortScale) } ?: NO_DATA,
-                caption = d?.strain?.let { "of ${UnitFormatter.effortScaleMax(effortScale)}" },
+                caption = d?.strain?.let { "of ${UnitFormatter.effortScaleMax(effortScale)}" }
+                    ?: buildingHint(KeyMetric.EFFORT, isToday),
                 accent = d?.strain?.let { Palette.effortTint(it / StrainScorer.maxStrain) } ?: Palette.textTertiary,
                 spark = w.strain,
                 sparkColor = Palette.strain066,
@@ -1435,11 +1453,16 @@ private fun MetricGrid(
             )
         },
         KeyMetric.REST to { m ->
+            // Unscored TODAY → "building, wear it tonight" instead of a lone dash, so a fresh user reads
+            // "coming" not "broken" (#527); a scored day keeps its sleep caption, a past day stays bare.
             SparkStatTile(
                 modifier = m,
                 label = "Rest",
                 value = restScore?.let { "${it.roundToInt()}%" } ?: NO_DATA,
-                caption = restCaption(d),
+                // Scored → the sleep-duration caption. Unscored TODAY → the "building" hint. Unscored
+                // PAST day → keep the sleep caption (honest: missing score, not mid-calibration).
+                caption = if (restScore != null) restCaption(d)
+                          else buildingHint(KeyMetric.REST, isToday) ?: restCaption(d),
                 accent = restScore?.let { Palette.recoveryColor(it) } ?: Palette.textTertiary,
                 spark = w.sleepMin,
                 sparkColor = Palette.metricPurple,
@@ -2425,6 +2448,22 @@ private fun restCaption(d: DailyMetric?): String? = when {
     d?.totalSleepMin != null -> sleepValue(d)
     d?.efficiency != null -> String.format(Locale.US, "%.0f%% eff", d.efficiency)
     else -> null
+}
+
+/**
+ * Short "it's coming, not broken" caption for an unscored Effort/Rest tile on TODAY only (#527). Rest
+ * fills in after a night's sleep; Effort fills in once cardio load is logged. Returns null off-today so
+ * a navigated PAST day with no score honestly stays a bare dash (missing data, not mid-calibration) —
+ * mirrors the recoveryCalibration today-only rule the Charge tile uses. Pure + unit-tested. Mirrors the
+ * iOS buildingHint(_:). Call sites only reach here when the score is genuinely absent.
+ */
+internal fun buildingHint(metric: KeyMetric, isToday: Boolean): String? {
+    if (!isToday) return null
+    return when (metric) {
+        KeyMetric.REST -> "Building, wear it tonight"
+        KeyMetric.EFFORT -> "Building, moves as you do"
+        else -> null
+    }
 }
 
 // MARK: - Steps / Weight / Calories tile logic (issue #107)

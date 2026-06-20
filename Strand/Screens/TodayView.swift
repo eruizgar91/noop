@@ -818,34 +818,34 @@ struct TodayView: View {
             // flanked by smaller Rest and Effort rings over the scenic backdrop.
             scoreHeroRow(d: d, score: score)
 
-            // The plain-English read-out — the gold Synthesis card — carries the greeting + the
-            // SOLID/CALIBRATING data-confidence pill in its top-right (moved off the removed header).
+            // The greeting + SOLID/CALIBRATING data-confidence pill ride in their OWN header row
+            // ABOVE the card, not as a top-trailing overlay over it (#527). The old overlay reserved
+            // a fixed 188pt inset on the card's overline + status rows so the cluster wouldn't collide
+            // with them on a narrow iPhone — but that squeezed the big status word below its natural
+            // width, so a single word ("Calibrating") was force-broken mid-word ("Calibrati/ng").
+            // A separate row CAN'T overlap the "SYNTHESIS" overline or the status word, and lets the
+            // card keep its FULL width (titleTrailingInset: 0) so the status stays one line.
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(greetingWord)
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Spacer(minLength: 8)
+                recoveryStatePill(score: score)
+                    .layoutPriority(1)   // the pill keeps its width; the greeting yields/scales first
+            }
+            .accessibilityElement(children: .combine)
+
+            // The plain-English read-out — the gold Synthesis card. Full width now the greeting/pill
+            // moved to their own row, so the status word never gets squeezed into a mid-word break.
             InsightCard(
                 category: "Synthesis",
                 status: calibrationStatus ?? "\(hrvInsightStatus(d, score: score))",
                 detail: calibrationDetail ?? "\(hrvInsightDetail(d, score: score))",
                 statusColor: score.map { StrandPalette.recoveryColor($0) } ?? StrandPalette.textTertiary,
-                tint: StrandPalette.chargeColor,
-                // Reserve room on the overline + status rows for the greeting + state-pill overlay
-                // below, so they don't collide on a narrow iPhone (#69).
-                titleTrailingInset: 188
+                tint: StrandPalette.chargeColor
             )
-            .overlay(alignment: .topTrailing) {
-                // Greeting + data-confidence pill sit in the card's top-right. Cap the cluster's
-                // width and let the greeting scale-to-fit (rather than wrap) so on a narrow iPhone
-                // it stays a tidy single line in the corner and never crowds the card's own
-                // "Synthesis" overline / large status word (#69). Right-aligned so it hugs the edge.
-                HStack(spacing: 8) {
-                    Text(greetingWord)
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                    recoveryStatePill(score: score)
-                }
-                .frame(maxWidth: 220, alignment: .trailing)
-                .padding(18)
-            }
 
             // Honest "why is Effort 0?" caption (#482/#480) — only when today's Effort is a real
             // near-zero, so a calm day reads as explained rather than broken.
@@ -1299,20 +1299,25 @@ struct TodayView: View {
                 sparkColor: StrandPalette.accent
             )
         case .effort:
+            // Unscored TODAY → a short "building" hint instead of the "of N" axis caption, so a
+            // fresh user reads "coming" not "broken" (#527); a scored day keeps "of N".
             StatTile(
                 label: "Effort",
                 value: d?.strain.map { UnitFormatter.effortDisplay($0, scale: effortScale) } ?? "—",
-                caption: "of \(UnitFormatter.effortScaleMax(effortScale))",
+                caption: d?.strain != nil ? "of \(UnitFormatter.effortScaleMax(effortScale))"
+                                          : (buildingHint(.effort) ?? "of \(UnitFormatter.effortScaleMax(effortScale))"),
                 accent: d?.strain.map { StrandPalette.effortTint(fraction: $0 / StrainScorer.maxStrain) } ?? StrandPalette.textPrimary,
                 sparkline: sparks["strain"],
                 sparkColor: StrandPalette.strain066
             )
             .overlay(alignment: .topTrailing) { scoreInfoButton(.effort) }
         case .rest:
+            // Unscored TODAY → "building, wear it tonight" instead of a lone "—" caption (#527);
+            // a scored day keeps its sleep-duration / efficiency caption.
             StatTile(
                 label: "Rest",
                 value: restScore.map { "\(Int($0.rounded()))%" } ?? "—",
-                caption: restCaption(d),
+                caption: restScore != nil ? restCaption(d) : (buildingHint(.rest) ?? restCaption(d)),
                 accent: restScore.map { StrandPalette.recoveryColor($0) } ?? StrandPalette.textPrimary,
                 sparkline: sparks["sleep_total_min"],
                 sparkColor: StrandPalette.metricPurple
@@ -1826,6 +1831,26 @@ struct TodayView: View {
     private func restCaption(_ d: DailyMetric?) -> String? {
         if d?.totalSleepMin != nil { return sleepValue(d) }
         return d?.efficiency.map { String(format: "%.0f%% eff", $0) }
+    }
+
+    /// Short "it's coming, not broken" caption for an unscored Effort/Rest tile on TODAY only. The
+    /// call sites only reach here when the score is genuinely absent; this adds the today-only gate so
+    /// a navigated PAST day with no score honestly stays a bare "—" (missing data, not mid-calibration).
+    /// Mirrors the recoveryCalibration today-only rule the Charge tile uses for its "N of 4" treatment.
+    private func buildingHint(_ metric: KeyMetric) -> String? {
+        Self.buildingHintCopy(metric, isToday: selectedDayOffset == 0)
+    }
+
+    /// Pure copy/gate behind `buildingHint` — extracted so it can be unit-tested without a live view.
+    /// Rest fills in after a night's sleep; Effort fills in once cardio load is logged. Em-dash-free
+    /// house style. Returns nil off-today and for any metric other than Effort/Rest (#527).
+    static func buildingHintCopy(_ metric: KeyMetric, isToday: Bool) -> String? {
+        guard isToday else { return nil }
+        switch metric {
+        case .rest:   return "Building, wear it tonight"
+        case .effort: return "Building, moves as you do"
+        default:      return nil
+        }
     }
 
     /// Active calories (Apple) for the latest day, falling back to the sparkline tail.

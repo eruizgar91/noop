@@ -11,11 +11,11 @@ options:
   developmentLanguage: en
 settings:
   base:
-    MARKETING_VERSION: "5.3.0"
+    MARKETING_VERSION: "6.0.0"
     # iOS build number (CFBundleVersion). GLOBAL so the iOS app AND its widget extension inherit the
     # SAME value — they must match or iOS warns "extension version must match parent app" (#416).
     # macOS sets its own CFBundleVersion on the Strand target and is unaffected by this.
-    CURRENT_PROJECT_VERSION: "138"
+    CURRENT_PROJECT_VERSION: "139"
     SWIFT_VERSION: "5.0"
     # Emit localizable strings so Xcode auto-extracts every LocalizedStringKey into the
     # String Catalog on build (the English (US) base entries).
@@ -75,10 +75,11 @@ targets:
         CFBundleName: NOOP
         CFBundleDisplayName: NOOP
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
-        CFBundleVersion: "169"
+        CFBundleVersion: "170"
         LSMinimumSystemVersion: "13.0"
         LSApplicationCategoryType: public.app-category.healthcare-fitness
         NSBluetoothAlwaysUsageDescription: "NOOP connects directly to your WHOOP strap over Bluetooth to read heart rate, R-R intervals, battery, and sensor data locally on your Mac. Nothing leaves your device."
+        NSLocationWhenInUseUsageDescription: "NOOP records your route during an outdoor workout to show distance, pace, and a map. The route stays on your device. Nothing leaves it."
         # The AI Coach's "Custom (OpenAI-compatible)" provider talks to a LOCAL LLM server over plain
         # HTTP on loopback (Ollama / LM Studio / llama.cpp at http://localhost:…). ATS blocks cleartext
         # by default; NSAllowsLocalNetworking exempts loopback/.local/unqualified hosts ONLY — public
@@ -202,6 +203,10 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         UIBackgroundModes:
           - bluetooth-central
+          # #524: keep recording an outdoor workout's GPS route while the app is backgrounded (screen off),
+          # matching Android's foreground-service capture. Required by GpsWorkoutRecorder's
+          # allowsBackgroundLocationUpdates; without this mode iOS crashes when background updates start.
+          - location
           # #510: the scheduled debug auto-export submits a BGAppRefreshTaskRequest so iOS can wake the
           # backgrounded app near the user's chosen time to write the overnight strap-log drop. BGAppRefresh
           # needs the "fetch" background mode; the task id below must also be permitted (and registered at
@@ -214,6 +219,7 @@ targets:
         BGTaskSchedulerPermittedIdentifiers:
           - com.noopapp.noop.debugexport
         NSBluetoothAlwaysUsageDescription: "NOOP connects directly to your WHOOP strap over Bluetooth to read heart rate, R-R intervals, battery, and sensor data locally on your iPhone. Nothing leaves your device."
+        NSLocationWhenInUseUsageDescription: "NOOP records your route during an outdoor workout to show distance, pace, and a map, and keeps recording while the screen is off. The route stays on your device. Nothing leaves it."
         NSHealthShareUsageDescription: "NOOP reads your own Apple Health data on-device to compute recovery, strain, and sleep. Nothing leaves your device."
         NSHealthUpdateUsageDescription: "NOOP writes the metrics it computes from your strap back into Apple Health, on-device and only when you allow it."
         # #187: the opt-in AI Coach's "Custom (OpenAI-compatible)" provider can point at a LOCAL LLM on

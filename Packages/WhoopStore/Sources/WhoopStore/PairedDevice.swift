@@ -38,7 +38,19 @@ public struct PairedDevice: Equatable, Sendable, Identifiable {
 
 public enum DeviceStatus: String, Sendable, CaseIterable { case active, paired, archived }
 
-public enum SourceKind: String, Sendable, CaseIterable { case liveBLE, historyBLE, cloudImport, fileImport }
+public enum SourceKind: String, Sendable, CaseIterable {
+    case liveBLE, historyBLE, cloudImport, fileImport
+    /// A live FTMS (Fitness Machine Service, 0x1826) gym machine — treadmill / indoor bike / rower /
+    /// cross-trainer. Streams a live machine-data + HR session that records via the existing live-workout
+    /// path. Additive: existing rows never carry this; only the gym-equipment wizard writes it.
+    case ftms
+    /// An EXPERIMENTAL Huami-family live HR source — Amazfit / Zepp (incl. Helio) and Xiaomi Mi Band.
+    /// Reads the standard 0x180D HR service when exposed, else the documented Huami custom HR
+    /// characteristic, else surfaces an honest "needs pairing we can't do" message. Best-effort, shipped
+    /// behind the experimental add-device tier. Additive: only the experimental wizard writes it.
+    /// (Garmin uses `liveBLE` — its live HR is the standard broadcast-HR path, no proprietary protocol.)
+    case huami
+}
 
 /// Canonical metric a source can provide. Drives capability-aware UI + the day-owner resolver.
 public enum Metric: String, Sendable, CaseIterable, Codable {

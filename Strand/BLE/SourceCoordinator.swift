@@ -60,7 +60,15 @@ final class SourceCoordinator: ObservableObject {
 
     /// The lazily-created generic-strap source. nil until the first switch to a strap; reused after.
     private var standardSource: StandardHRSource?
-    /// The deviceId the `standardSource` is currently running for (so we don't churn on the same id).
+    /// The lazily-created FTMS gym-equipment source. nil until the first switch to a gym machine. An FTMS
+    /// device (sourceKind `.ftms`) is a non-WHOOP live source, so it runs through the SAME strap edge as
+    /// `standardSource` — only the source object differs. Exactly one of the two is ever live at a time.
+    private var ftmsSource: FTMSSource?
+    /// The lazily-created EXPERIMENTAL Huami source (Amazfit / Zepp / Mi Band). nil until the first switch
+    /// to a `.huami` device. Like the others it's a non-WHOOP live source sharing the same strap edge —
+    /// exactly one of the non-WHOOP sources is ever live at a time.
+    private var huamiSource: HuamiHRSource?
+    /// The deviceId the active non-WHOOP source (`standardSource` / `ftmsSource` / `huamiSource`) runs for.
     private var activeStrapId: String?
     /// True once we've transitioned onto a generic strap. While false (the default / WHOOP-active
     /// state), switching to WHOOP is a pure no-op — we never issue a redundant WHOOP (re)scan.
@@ -152,9 +160,8 @@ final class SourceCoordinator: ObservableObject {
         let peripheralId = peripheralId(for: id)
 
         if onStrap {
-            // Coming back from a generic strap: tear that source down first.
-            standardSource?.stop()
-            standardSource = nil
+            // Coming back from a generic strap / FTMS machine: tear that source down first.
+            tearDownNonWhoopSource()
             activeStrapId = nil
             onStrap = false
             pointWhoop(at: id, peripheralId: peripheralId)
@@ -190,19 +197,36 @@ final class SourceCoordinator: ObservableObject {
     private func switchToStrap(id: String) {
         guard activeStrapId != id else { return }   // already streaming this strap → no churn
 
-        // Leaving WHOOP for the first strap: pause WHOOP's BLE via its existing teardown.
+        // Leaving WHOOP for the first non-WHOOP source: pause WHOOP's BLE via its existing teardown.
         if !onStrap { stopWhoop() }
 
-        // Switching strap→strap: stop the previous strap's source before starting the new one.
-        if standardSource != nil { standardSource?.stop() }
+        // Switching source→source: stop the previous non-WHOOP source before starting the new one.
+        tearDownNonWhoopSource()
 
+        // Route by sourceKind: an FTMS gym machine runs FTMSSource; an EXPERIMENTAL Huami device
+        // (Amazfit / Zepp / Mi Band) runs the HuamiHRSource; everything else is a generic HR strap on
+        // StandardHRSource. All are non-WHOOP live sources sharing this same strap edge.
+        switch sourceKind(for: id) {
+        case .ftms:  startFTMSSource(id: id)
+        case .huami: startHuamiSource(id: id)
+        default:     startStandardSource(id: id)
+        }
+        activeStrapId = id
+        onStrap = true
+    }
+
+    /// Start the isolated `StandardHRSource` for a generic HR strap `id`.
+    private func startStandardSource(id: String) {
         let source = StandardHRSource(
             live: live,
             deviceId: id,
             persist: { [storeHandle] streams in
                 Task { if let store = await storeHandle() { _ = try? await store.insert(streams, deviceId: id) } }
             },
-            log: straplog)   // generic-HR lifecycle → the SAME exported strap log (issue #421)
+            log: straplog,   // generic-HR lifecycle → the SAME exported strap log (issue #421)
+            // Surface the generic strap's standard Battery Service (0x180F) charge the SAME place the
+            // WHOOP strap battery shows (the Live/device status), via the shared LiveState funnel.
+            onBattery: { [live] pct in live.setBattery(Double(pct)) })
         // CONNECT to the active strap's known peripheral, don't just scan. scan() only discovered + listed
         // it but never connected, so a Polar etc. showed as "found" yet never streamed (#421). connect()
         // reaches the cached peripheral by identifier (or scans-then-connects if not yet cached); a bare
@@ -213,8 +237,50 @@ final class SourceCoordinator: ObservableObject {
             source.scan()
         }
         standardSource = source
-        activeStrapId = id
-        onStrap = true
+    }
+
+    /// Start the isolated `FTMSSource` for a gym machine `id`. HR (when the machine reports it) rides the
+    /// SAME `LiveState` channel, so the existing live-workout recorder scores it — no new scoring loop.
+    private func startFTMSSource(id: String) {
+        let source = FTMSSource(
+            live: live,
+            log: straplog,
+            onBattery: { [live] pct in live.setBattery(Double(pct)) })
+        if let pid = peripheralId(for: id), let uuid = UUID(uuidString: pid) {
+            source.connect(uuid)
+        } else {
+            source.scan()
+        }
+        ftmsSource = source
+    }
+
+    /// Start the EXPERIMENTAL Huami source (Amazfit / Zepp / Mi Band) for `id`. HR (standard 0x180D when
+    /// exposed, else the documented Huami custom characteristic) rides the SAME `LiveState` channel as the
+    /// other sources, so the existing live UI + recorder handle it — no new scoring loop, no fabricated
+    /// data (the source stays at "—" when it can't read a real HR).
+    private func startHuamiSource(id: String) {
+        let source = HuamiHRSource(
+            live: live,
+            deviceId: id,
+            persist: { [storeHandle] streams in
+                Task { if let store = await storeHandle() { _ = try? await store.insert(streams, deviceId: id) } }
+            },
+            log: straplog,
+            onBattery: { [live] pct in live.setBattery(Double(pct)) })
+        if let pid = peripheralId(for: id), let uuid = UUID(uuidString: pid) {
+            source.connect(uuid)
+        } else {
+            source.scan()
+        }
+        huamiSource = source
+    }
+
+    /// Stop whichever non-WHOOP source (standard strap, FTMS machine, or Huami device) is live, and drop
+    /// the reference. Idempotent. Exactly one is ever live, but we stop all defensively.
+    private func tearDownNonWhoopSource() {
+        standardSource?.stop(); standardSource = nil
+        ftmsSource?.stop(); ftmsSource = nil
+        huamiSource?.stop(); huamiSource = nil
     }
 
     // MARK: - Identity adoption
@@ -269,6 +335,13 @@ final class SourceCoordinator: ObservableObject {
     /// "my-whoop" until it adopts one (→ connect to any WHOOP, unchanged) and for an unknown id.
     private func peripheralId(for id: String) -> String? {
         registry.devices.first(where: { $0.id == id })?.peripheralId
+    }
+
+    /// The registered `sourceKind` for a device id, or nil if the registry doesn't know it. Routes the
+    /// non-WHOOP switch to the right isolated source (`.ftms` → FTMSSource, `.huami` → HuamiHRSource,
+    /// anything else → StandardHRSource).
+    private func sourceKind(for id: String) -> SourceKind? {
+        registry.devices.first(where: { $0.id == id })?.sourceKind
     }
 
     /// Classify a device id as WHOOP vs a generic strap. WHOOP if the id is the canonical

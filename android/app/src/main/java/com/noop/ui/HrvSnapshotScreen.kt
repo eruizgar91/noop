@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noop.analytics.HrvAnalyzer
+import com.noop.analytics.SpotHrvReading
 import com.noop.data.MetricSeriesRow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -80,7 +81,11 @@ import java.util.TimeZone
  * rolling 30) because the analysis wants every clean beat in the window.
  */
 @Composable
-fun HrvSnapshotScreen(viewModel: AppViewModel, onClose: () -> Unit) {
+fun HrvSnapshotScreen(
+    viewModel: AppViewModel,
+    source: SpotHrvReading.Source = SpotHrvReading.Source.UNKNOWN,
+    onClose: () -> Unit,
+) {
     val live by viewModel.live.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -264,15 +269,20 @@ fun HrvSnapshotScreen(viewModel: AppViewModel, onClose: () -> Unit) {
             ResultCard(done)
         }
 
-        // Methodology.
+        // Methodology — source-aware caveat (a 5/MG's R-R is optical PPG, noisier than a chest strap).
+        // The same RMSSD math the nightly HRV uses (Task Force 1996, cleaned), so the spot number is
+        // comparable to your overnight figure.
         NoopCard(tint = Palette.restColor) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Overline("How this is measured")
                 Text(
                     "A 60-second snapshot of your beat-to-beat (R-R) intervals from the strap, cleaned " +
-                        "(range + ectopic-beat filtering) before computing RMSSD. It's an honest spot reading, " +
-                        "not a clinical measurement — take it seated, still, and at a consistent time of day " +
-                        "for comparable numbers.",
+                        "(range and ectopic-beat filtering) before computing RMSSD the same way your " +
+                        "overnight HRV is computed.",
+                    style = NoopType.footnote, color = Palette.textTertiary,
+                )
+                Text(
+                    SpotHrvReading.caveatFor(source),
                     style = NoopType.footnote, color = Palette.textTertiary,
                 )
             }

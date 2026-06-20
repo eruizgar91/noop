@@ -20,6 +20,13 @@
     <uses-permission
         android:name="android.permission.BLUETOOTH_CONNECT"
         tools:targetApi="s" />
+    <!-- Android 12+ (API 31+): broadcasting NOOP's live HR back out as a standard BLE Heart Rate
+         peripheral (0x180D) so gym kit can read it needs the advertise permission. Opt-in only:
+         the "Broadcast heart rate" toggle in Data Sources is OFF by default, and the permission is
+         requested at runtime right before the broadcast starts (see rememberRequestAdvertise). -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADVERTISE"
+        tools:targetApi="s" />
 
     <!-- Android 8-11 (API 26-30): legacy Bluetooth perms are install-time. -->
     <uses-permission
@@ -90,6 +97,11 @@
     <uses-permission android:name="android.permission.health.WRITE_HEART_RATE_VARIABILITY" />
     <uses-permission android:name="android.permission.health.WRITE_OXYGEN_SATURATION" />
     <uses-permission android:name="android.permission.health.WRITE_RESPIRATORY_RATE" />
+    <!-- HR samples, steps, active energy, and sleep writeback (#528, opt-in, default OFF). -->
+    <uses-permission android:name="android.permission.health.WRITE_ACTIVE_CALORIES_BURNED" />
+    <uses-permission android:name="android.permission.health.WRITE_STEPS" />
+    <uses-permission android:name="android.permission.health.WRITE_HEART_RATE" />
+    <uses-permission android:name="android.permission.health.WRITE_SLEEP" />
     <!-- Exercise-session + distance writeback (GPS workouts, opt-in). MUST be declared or Health
          Connect silently drops the runtime request and live workouts never write back (#412). -->
     <uses-permission android:name="android.permission.health.WRITE_EXERCISE" />

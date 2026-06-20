@@ -137,6 +137,14 @@ public enum Baselines {
     /// 0 / absent = no recalibration. Written by the Settings "Recalibrate HRV baseline" button.
     public static let hrvBaselineEpochKey: String = "noop.hrvBaselineEpoch"
 
+    /// UserDefaults key for the manual RECOVERY-baseline recalibration epoch (epoch SECONDS).
+    /// 0 / absent = no recalibration. This is the Charge-wide sibling of `hrvBaselineEpochKey`: HRV is
+    /// the dominant Charge driver and re-anchors on its own epoch today, while the resting-HR /
+    /// respiration / skin-temp baselines that also feed Charge re-anchor on THIS epoch. The Settings
+    /// "Recalibrate Charge baseline" button writes BOTH keys to now (see `recalibrateRecoveryBaselines`)
+    /// so the whole Charge build-up restarts cleanly. Same string on iOS UserDefaults + Android prefs.
+    public static let recoveryBaselineEpochKey: String = "noop.recoveryBaselineEpoch"
+
     /// Default per-metric configurations (HRV, resting HR, respiration, skin temp).
     public static let metricCfg: [String: MetricCfg] = [
         "hrv": MetricCfg(minVal: 5.0, maxVal: 250.0, floorSpread: 5.0,
@@ -264,8 +272,32 @@ public enum Baselines {
 
     /// Read the persisted manual-recalibration epoch (epoch SECONDS) for the HRV baseline.
     /// 0 = no recalibration. The Settings "Recalibrate HRV baseline" button writes now-seconds here.
-    public static func hrvBaselineEpoch() -> Double {
-        UserDefaults.standard.double(forKey: hrvBaselineEpochKey)
+    public static func hrvBaselineEpoch(_ defaults: UserDefaults = .standard) -> Double {
+        defaults.double(forKey: hrvBaselineEpochKey)
+    }
+
+    /// Read the persisted manual-recalibration epoch (epoch SECONDS) for the wider RECOVERY baseline
+    /// (resting HR / respiration / skin temp). 0 = no recalibration. Written alongside the HRV epoch by
+    /// `recalibrateRecoveryBaselines`. A fold that wants to honour this passes it through the day-keyed
+    /// `foldHistory(_:dayKeys:cfg:baselineEpoch:)` overload exactly like the HRV path.
+    public static func recoveryBaselineEpoch(_ defaults: UserDefaults = .standard) -> Double {
+        defaults.double(forKey: recoveryBaselineEpochKey)
+    }
+
+    /// Recalibrate every baseline that feeds Charge: drop the anchor so the ~4-night build-up restarts
+    /// from `now`. This is the single source of truth behind the Settings "Recalibrate Charge baseline"
+    /// button on all platforms — it writes `now` (epoch SECONDS) to BOTH the HRV epoch and the recovery
+    /// epoch, so HRV (the dominant driver, already wired) and the resting-HR / respiration / skin-temp
+    /// baselines re-anchor together. It does NOT delete any stored day: only the day from which the
+    /// baselines re-learn moves. After this the next baseline computation re-seeds from the first
+    /// on-or-after-`now` night, so Today honestly shows the calibrating/building state again.
+    /// - Parameters:
+    ///   - now: the anchor instant (epoch SECONDS). Defaults to the current time.
+    ///   - defaults: the store to write to (overridable for tests).
+    public static func recalibrateRecoveryBaselines(now: Double = Date().timeIntervalSince1970,
+                                                    defaults: UserDefaults = .standard) {
+        defaults.set(now, forKey: hrvBaselineEpochKey)
+        defaults.set(now, forKey: recoveryBaselineEpochKey)
     }
 
     /// Replay an ordered sequence of nightly values (oldest first) to build state, honouring a

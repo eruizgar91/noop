@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.FileUpload
 import androidx.compose.material.icons.filled.FitnessCenter
+import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.MonitorHeart
 import androidx.compose.material.icons.filled.Restaurant
 import androidx.compose.material.icons.filled.Watch
@@ -55,10 +56,12 @@ import com.noop.data.ImportSummary
 import com.noop.ingest.AppleHealthImporter
 import com.noop.ingest.HealthConnectImporter
 import com.noop.ingest.HealthConnectWriter
+import com.noop.ingest.ActivityFileImporter
 import com.noop.ingest.LiftingImporter
 import com.noop.ingest.NutritionCsvImporter
 import com.noop.ingest.XiaomiBandImporter
 import com.noop.ingest.WhoopCsvImporter
+import com.noop.ingest.WearableExportImporter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -96,6 +99,10 @@ fun DataSourcesScreen(vm: AppViewModel) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val live by vm.live.collectAsStateWithLifecycle()
+    val hrBroadcast by vm.hrBroadcast.collectAsStateWithLifecycle()
+    val hrBroadcastAdvertising by vm.hrBroadcastAdvertising.collectAsStateWithLifecycle()
+    val hrBroadcastSubscribers by vm.hrBroadcastSubscribers.collectAsStateWithLifecycle()
+    val hrBroadcastStatus by vm.hrBroadcastStatus.collectAsStateWithLifecycle()
     val hcAutoSync by vm.hcAutoSync.collectAsStateWithLifecycle()
     val hcSyncHours by vm.hcSyncHours.collectAsStateWithLifecycle()
     val hcLastSync by vm.hcLastSync.collectAsStateWithLifecycle()
@@ -117,7 +124,11 @@ fun DataSourcesScreen(vm: AppViewModel) {
     var nutritionWeighIns by remember { mutableStateOf<Int?>(null) }
     // Imported lifting (Hevy / Liftosaur) writes workouts under its own source ("lifting").
     var liftingWorkouts by remember { mutableStateOf<Int?>(null) }
+    // Imported workout files (GPX / TCX / FIT) write workouts under their own source ("activity-file").
+    var activityFiles by remember { mutableStateOf<Int?>(null) }
     var xiaomiDays by remember { mutableStateOf<Int?>(null) }
+    // Imported Oura / Fitbit / Garmin exports write daily metrics under their own per-brand source.
+    var wearableDays by remember { mutableStateOf<Int?>(null) }
 
     LaunchedEffect(Unit) {
         val now = System.currentTimeMillis() / 1000
@@ -132,6 +143,11 @@ fun DataSourcesScreen(vm: AppViewModel) {
         nutritionWeighIns = vm.repo.metricSeries(NutritionCsvImporter.SOURCE_ID, "weight", "0000-01-01", "9999-12-31").size
         xiaomiDays = vm.repo.metricSeries(XiaomiBandImporter.DEFAULT_DEVICE_ID, "steps", "0000-01-01", "9999-12-31").size
         liftingWorkouts = vm.repo.workouts(LiftingImporter.SOURCE_ID, 0L, now).size
+        activityFiles = vm.repo.workouts(ActivityFileImporter.SOURCE_ID, 0L, now).size
+        wearableDays = WearableExportImporter.Brand.values().sumOf {
+            vm.repo.metricSeries(it.sourceId, "rhr", "0000-01-01", "9999-12-31").size +
+                vm.repo.metricSeries(it.sourceId, "sleep_total_min", "0000-01-01", "9999-12-31").size
+        }
     }
 
     // Whole-store backup: export to a user-created document; import from a picked one.
@@ -188,7 +204,12 @@ fun DataSourcesScreen(vm: AppViewModel) {
         nutritionDays = vm.repo.metricSeries(NutritionCsvImporter.SOURCE_ID, "calories_in", "0000-01-01", "9999-12-31").size
         nutritionWeighIns = vm.repo.metricSeries(NutritionCsvImporter.SOURCE_ID, "weight", "0000-01-01", "9999-12-31").size
         liftingWorkouts = vm.repo.workouts(LiftingImporter.SOURCE_ID, 0L, nowS).size
+        activityFiles = vm.repo.workouts(ActivityFileImporter.SOURCE_ID, 0L, nowS).size
         xiaomiDays = vm.repo.metricSeries(XiaomiBandImporter.DEFAULT_DEVICE_ID, "steps", "0000-01-01", "9999-12-31").size
+        wearableDays = WearableExportImporter.Brand.values().sumOf {
+            vm.repo.metricSeries(it.sourceId, "rhr", "0000-01-01", "9999-12-31").size +
+                vm.repo.metricSeries(it.sourceId, "sleep_total_min", "0000-01-01", "9999-12-31").size
+        }
     }
 
     // Run an importer off the main thread, refresh the counts, then toast the result.
@@ -197,6 +218,18 @@ fun DataSourcesScreen(vm: AppViewModel) {
         scope.launch {
             val summary = withContext(Dispatchers.IO) {
                 runCatching { block() }.getOrElse { ImportSummary.failure("Import", it.message ?: "failed") }
+            }
+            // Mirror the import into the SAME exported strap log the WHOOP path uses (issue #421 parity),
+            // so a tester's file import is captured in a shared debug bundle. On success: brand label +
+            // per-table COUNTS only (e.g. "dailyMetric=120, sleepSession=88"). On a zero-row/failed import:
+            // the brand label + the human reason from the summary. Never a file name, a path, or any health
+            // value. Prefixed "Import: " so it's distinguishable from WHOOP / generic-HR lines. The Swift
+            // twin logs the same in DataSourcesView's import handlers.
+            if (summary.totalRows > 0) {
+                val countsText = summary.counts.entries.joinToString(", ") { "${it.key}=${it.value}" }
+                vm.ble.externalLog("Import ${summary.source}: $countsText")
+            } else {
+                vm.ble.externalLog("Import ${summary.source} failed: ${summary.message}")
             }
             refreshCounts()
             busy = false
@@ -230,6 +263,20 @@ fun DataSourcesScreen(vm: AppViewModel) {
         }
     }
 
+    // Oura / Fitbit / Garmin own-data export: daily metrics + sleep sessions under the brand's source.
+    val wearableImportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri -> if (uri != null) runImport { WearableExportImporter.importExport(context, uri, vm.repo) } }
+
+    // Workout file (GPX / TCX / FIT): one imported activity → one workout; reload the Workouts list too.
+    val activityFileImportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) runImport {
+            ActivityFileImporter.importExport(context, uri, vm.repo).also { vm.loadWorkouts() }
+        }
+    }
+
     // Health Connect permission request → import once granted.
     val hcPermissionLauncher = rememberLauncherForActivityResult(
         PermissionController.createRequestPermissionResultContract(),
@@ -244,6 +291,11 @@ fun DataSourcesScreen(vm: AppViewModel) {
     val healthConnectAvailable = remember {
         HealthConnectImporter.sdkStatus(context) == HealthConnectClient.SDK_AVAILABLE
     }
+
+    // "Broadcast heart rate": flip the toggle on only AFTER the BLUETOOTH_ADVERTISE (+ CONNECT) runtime
+    // permission is granted on Android 12+ — otherwise advertising silently no-ops. On grant (or pre-12,
+    // where it's install-time) the VM starts the HR peripheral.
+    val requestAdvertise = rememberRequestAdvertise(onGranted = { vm.setHrBroadcast(true) })
 
     // Import directly if permissions already granted, otherwise request them first.
     fun startHealthConnect() {
@@ -441,10 +493,10 @@ fun DataSourcesScreen(vm: AppViewModel) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("Share back to Health Connect", style = NoopType.subhead, color = Palette.textPrimary)
                         Text(
-                            "Write the nightly metrics NOOP computes from your strap (resting HR, " +
-                                "HRV, SpO₂, respiratory rate) into Health Connect so other apps can " +
-                                "use them. Only NOOP's own computed values — imported data is never " +
-                                "echoed back.",
+                            "Write the metrics NOOP computes from your strap (resting HR, HRV, SpO₂, " +
+                                "respiratory rate, heart rate, steps, active energy and sleep) into " +
+                                "Health Connect so other apps can use them. Only NOOP's own values are " +
+                                "shared. Imported data is never echoed back.",
                             style = NoopType.footnote,
                             color = Palette.textTertiary,
                         )
@@ -554,6 +606,128 @@ fun DataSourcesScreen(vm: AppViewModel) {
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth(),
             ) { liftingImportLauncher.launch(arrayOf("*/*")) }
+        }
+
+        // --- Workout file (GPX / TCX / FIT) — any brand, on-device ---
+        SourceCard(
+            title = "Workout file (GPX / TCX / FIT)",
+            icon = Icons.Filled.Map,
+            tint = Palette.metricAmber,
+            subtitle = "Import a single exported workout file from any brand — Garmin, Coros, Suunto, " +
+                "Wahoo, Polar, Strava, Apple — straight off your phone. GPS route, distance, heart rate " +
+                "and calories come in where the file has them. Fully offline; nothing leaves your phone.",
+        ) {
+            val hasFiles = (activityFiles ?: 0) > 0
+            StatePill(
+                title = if (hasFiles) "Imported" else "Nothing imported",
+                tone = if (hasFiles) StrandTone.Accent else StrandTone.Neutral,
+                showsDot = true,
+            )
+            CountLine(
+                primary = activityFiles?.let { "$it workouts" } ?: "—",
+                secondary = "GPX · TCX · FIT — one workout per file",
+            )
+            BackupButton(
+                label = "Import workout file…",
+                icon = Icons.Filled.FileUpload,
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) { activityFileImportLauncher.launch(arrayOf("*/*")) }
+        }
+
+        // --- Oura / Fitbit / Garmin own-data export — on-device ---
+        SourceCard(
+            title = "Oura / Fitbit / Garmin export",
+            icon = Icons.Filled.Watch,
+            tint = Palette.metricPurple,
+            subtitle = "Import your own data export from Oura, Fitbit or Garmin — sleep, resting heart " +
+                "rate, HRV, steps and more, where the export has them. Download it from the brand's app " +
+                "(Oura: Account → Export Data; Fitbit: Google Takeout; Garmin: Export Your Data), then " +
+                "choose the file here. Fully offline; nothing leaves your phone. Each brand's own " +
+                "readiness or sleep score is kept for reference only — your scores stay yours.",
+        ) {
+            val hasDays = (wearableDays ?: 0) > 0
+            StatePill(
+                title = if (hasDays) "Imported" else "Nothing imported",
+                tone = if (hasDays) StrandTone.Accent else StrandTone.Neutral,
+                showsDot = true,
+            )
+            CountLine(
+                primary = wearableDays?.let { "$it day metrics" } ?: "—",
+                secondary = "Oura JSON · Fitbit Takeout · Garmin GDPR — daily metrics + sleep",
+            )
+            BackupButton(
+                label = "Import wearable export…",
+                icon = Icons.Filled.FileUpload,
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) { wearableImportLauncher.launch(arrayOf("*/*")) }
+        }
+
+        // --- Broadcast heart rate (NOOP as a standard BLE HR peripheral) ---
+        SourceCard(
+            title = "Broadcast heart rate",
+            icon = Icons.Filled.MonitorHeart,
+            tint = DomainTheme.Effort.color,
+            subtitle = "Re-share your live strap heart rate over Bluetooth as a standard heart-rate " +
+                "sensor, so a gym treadmill, bike, Zwift, Peloton or any fitness app nearby can read " +
+                "it. Local Bluetooth only. Nothing leaves your phone. Off by default.",
+        ) {
+            if (hrBroadcast) {
+                val (label, tone) =
+                    if (hrBroadcastAdvertising) "Broadcasting" to StrandTone.Positive
+                    else "Starting…" to StrandTone.Warning
+                StatePill(title = label, tone = tone, showsDot = true, pulsing = !hrBroadcastAdvertising)
+                CountLine(
+                    primary = if (hrBroadcastAdvertising) "Standard HR sensor (0x180D)" else "—",
+                    secondary = when {
+                        hrBroadcastSubscribers > 0 ->
+                            "$hrBroadcastSubscribers ${if (hrBroadcastSubscribers == 1) "device" else "devices"} reading"
+                        live.heartRate != null -> "Sharing ${live.heartRate} bpm · waiting for a device"
+                        else -> "No live heart rate yet · open Live to pair your strap"
+                    },
+                )
+            } else {
+                // Parity with the Swift card, which shows an explicit "Off" pill when the toggle is off
+                // (DataSourcesView.broadcastHrCard: StatePill("Off", tone: .neutral, showsDot: false)).
+                StatePill(title = "Off", tone = StrandTone.Neutral, showsDot = false)
+            }
+            hrBroadcastStatus?.let { note ->
+                Text(note, style = NoopType.footnote, color = Palette.statusWarning)
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Broadcast heart rate", style = NoopType.subhead, color = Palette.textPrimary)
+                    Text(
+                        "Acts as a standard Bluetooth heart-rate strap. Pair NOOP from your treadmill, " +
+                            "bike or app to see your strap's heart rate there.",
+                        style = NoopType.footnote,
+                        color = Palette.textTertiary,
+                    )
+                }
+                Switch(
+                    checked = hrBroadcast,
+                    onCheckedChange = { on ->
+                        // Turning ON requests BLUETOOTH_ADVERTISE first (the VM flips on once granted);
+                        // turning OFF stops the peripheral immediately.
+                        if (on) requestAdvertise() else vm.setHrBroadcast(false)
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Palette.surfaceBase,
+                        checkedTrackColor = Palette.accent,
+                        uncheckedThumbColor = Palette.textSecondary,
+                        uncheckedTrackColor = Palette.surfaceInset,
+                        uncheckedBorderColor = Palette.hairline,
+                    ),
+                    modifier = Modifier.semantics {
+                        contentDescription = "Broadcast heart rate as a Bluetooth sensor"
+                    },
+                )
+            }
         }
 
         // --- Live WHOOP strap over BLE ---

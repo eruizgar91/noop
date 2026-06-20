@@ -121,4 +121,39 @@ class TodayMetricTilesTest {
         val hc = listOf(stepsDay("health-connect", "2026-01-04", 9500))
         assertEquals(9500, stepsForDay(apple, hc, "2026-01-04"))
     }
+
+    // MARK: buildingHint — the unscored Effort/Rest "it's coming" caption, today-only (#527)
+
+    @Test
+    fun buildingHint_rest_today_isTheWearItTonightCopy() {
+        assertEquals("Building, wear it tonight", buildingHint(KeyMetric.REST, isToday = true))
+    }
+
+    @Test
+    fun buildingHint_effort_today_isTheMovesAsYouDoCopy() {
+        assertEquals("Building, moves as you do", buildingHint(KeyMetric.EFFORT, isToday = true))
+    }
+
+    @Test
+    fun buildingHint_pastDay_isNull_soAnUnscoredOldDayStaysABareDash() {
+        // Honesty: a navigated past day with no score is missing data, not mid-calibration.
+        assertNull(buildingHint(KeyMetric.REST, isToday = false))
+        assertNull(buildingHint(KeyMetric.EFFORT, isToday = false))
+    }
+
+    @Test
+    fun buildingHint_otherMetrics_null_onlyEffortAndRestGetTheHint() {
+        // Charge owns its own "Calibrating N of 4" treatment; other tiles never show this hint.
+        assertNull(buildingHint(KeyMetric.CHARGE, isToday = true))
+        assertNull(buildingHint(KeyMetric.HRV, isToday = true))
+    }
+
+    @Test
+    fun buildingHint_copy_hasNoEmDash() {
+        // House style: user-facing strings carry no em-dashes.
+        for (m in listOf(KeyMetric.REST, KeyMetric.EFFORT)) {
+            val hint = buildingHint(m, isToday = true)!!
+            assert(!hint.contains('—')) { "buildingHint($m) must not contain an em-dash: $hint" }
+        }
+    }
 }

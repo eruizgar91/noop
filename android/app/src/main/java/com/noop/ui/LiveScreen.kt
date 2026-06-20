@@ -66,6 +66,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import com.noop.analytics.HrZones
+import com.noop.analytics.SpotHrvReading
 import com.noop.analytics.Sport
 import com.noop.analytics.WorkoutSport
 import com.noop.ble.LiveState
@@ -242,7 +243,18 @@ fun LiveScreen(viewModel: AppViewModel, onManageDevices: () -> Unit = {}) {
                 onDismissRequest = { showHrvSnapshot = false },
                 properties = DialogProperties(usePlatformDefaultWidth = false),
             ) {
-                HrvSnapshotScreen(viewModel = viewModel, onClose = { showHrvSnapshot = false })
+                // Tell the reading where its R-R is coming from so the caveat is honest: a WHOOP 5/MG
+                // derives R-R from the optical pulse signal (noisier) while a WHOOP 4 / chest strap is
+                // electrical R-R. Driven off the picked strap model.
+                val hrvSource = when (selectedModel) {
+                    WhoopModel.WHOOP5_MG -> SpotHrvReading.Source.OPTICAL_PPG
+                    WhoopModel.WHOOP4 -> SpotHrvReading.Source.CHEST_STRAP
+                }
+                HrvSnapshotScreen(
+                    viewModel = viewModel,
+                    source = hrvSource,
+                    onClose = { showHrvSnapshot = false },
+                )
             }
         }
 

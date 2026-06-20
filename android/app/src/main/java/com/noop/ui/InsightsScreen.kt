@@ -322,6 +322,13 @@ fun InsightsScreen(vm: AppViewModel, onOpenInsightsHub: () -> Unit = {}) {
 
         Spacer(Modifier.height(Metrics.sectionGap - 20.dp))
 
+        // --- Caffeine window (#526) — log an intake + a rough on-device "still active"
+        //     hint. Self-contained (owns its own SharedPreferences state). Opt-in: shows
+        //     nothing until the user logs one. Twin of macOS CaffeineLogCard. ---
+        CaffeineLogCard()
+
+        Spacer(Modifier.height(Metrics.sectionGap - 20.dp))
+
         // --- Personal experiment (LOCAL ONLY n-of-1 protocol) ------------------
         run {
             // Candidates are gated to behaviours the user actually has data for —

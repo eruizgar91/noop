@@ -17,6 +17,50 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
+## 6.0.0 — NOOP grows up: not just for WHOOP anymore (all platforms)
+
+The biggest release yet. NOOP started as a way to read your own WHOOP over Bluetooth, fully offline, and it still does all of that, exactly as before. 6.0 opens it up to a lot more gear while keeping everything on your device.
+
+**More than WHOOP**
+- **Standard Bluetooth chest straps and arm bands** (Polar H10 and the like) work as a live heart-rate and HRV source, now with an on-demand **spot HRV reading** computed the same way as your overnight HRV.
+- **Gym machines over FTMS.** Treadmills, bikes, rowers and cross-trainers that speak the standard Fitness Machine profile show up and feed heart rate straight in.
+- **Standard running and cycling sensors.** Live speed, cadence and power (RSC / CSC / CPS) read during a workout, alongside heart rate. Your heart rate path is untouched.
+- **Strap battery** now reads from standard Bluetooth devices that report it.
+
+**Import your history, fully offline**
+- **Oura, Fitbit and Garmin data exports.** Download your own export file and NOOP imports sleep, resting heart rate, HRV and steps wherever the file has them. It never talks to their cloud. Their own readiness or sleep scores are kept as reference only; your NOOP scores are recomputed from the raw signals, never copied.
+- **GPX, TCX and FIT workout files** import too, with their route.
+
+**Broadcast out**
+- **NOOP as a heart-rate sensor.** Turn on Broadcast in Data Sources and NOOP re-shares your strap's live heart rate as a standard Bluetooth HR sensor, so a treadmill, Zwift, Peloton or any fitness app can read it. Local Bluetooth only, nothing leaves your device. Off by default.
+
+**Experimental: more bands (help us test)**
+- **New Experimental tier in Add a device.** A clearly-labeled section lists Amazfit / Zepp (including Helio), Xiaomi Mi Band, Garmin watches, and Oura rings. Best-effort, opt-in, and honest about what they can actually do. None of them ever makes up a number.
+- **Amazfit / Zepp and Mi Band:** live heart rate over the standard profile where the band exposes it, otherwise the documented custom Huami characteristic. Bands that need a pairing handshake we can't do yet say so plainly and point you at file import, instead of faking a reading.
+- **Garmin:** turn on Broadcast Heart Rate on the watch and it shows up like a normal strap. We walk you through it.
+- **Oura:** the ring is proprietary and only syncs to the Oura app, so there's no open live stream. NOOP scans for it and checks its services so you can see we looked, then points you at file import.
+
+**New on iPhone and Mac**
+- **GPS workout routes.** Outdoor runs, rides, walks and hikes record a route with distance, pace and a map, matching Android. Recording keeps going while the screen is off.
+
+**More**
+- **Recalibrate baselines.** A button in Settings to cleanly restart your Charge build-up if your first week got thrown off. It now restarts the whole set (HRV, resting HR, respiration and skin temp), not just HRV. Your history stays.
+- **Caffeine log.** Log a coffee, tea or energy drink in Insights and see a rough on-device estimate of how much may still be active (typical 5 to 6 hour half-life). A guide from what you logged, not a measurement. (#526)
+
+**Fixes**
+- **Sleep totals line up across every screen** now. The day's sleep is your main night, the same one the Sleep tab shows; naps are tracked and listed on their own, not added into one confusing number. (#525)
+- **A fresh or calibrating Charge / Rest / Effort tile** says "building, wear it tonight" instead of a bare dash that looked broken, and the greeting no longer overlaps the Synthesis heading on narrow screens. (#527)
+- **Manual workouts survive the app being killed** mid-session. (#529)
+- **The WHOOP 4.0 scheduled alarm actually buzzes now.** Our payload was two bytes short of the official app's. Thanks @ujix for the capture and fix, plus per-weekday alarm scheduling (thanks @hkuehl). (#535, #539)
+- **Android: share your metrics out to Health Connect** (heart rate, steps, energy, sleep), opt-in and de-duplicated so it can't double-count its own writes. Thanks @sunny-noop. (#528)
+
+Big thanks to everyone who reverse-engineered, reported and tested their way into this one. A pile of 6.0 came straight from your issues and PRs.
+
+**Install / update**
+- **Mac:** `brew upgrade --cask noopapp/noop/noop`, or the universal app from Releases.
+- **iPhone:** AltStore / SideStore from the .ipa on the Releases page.
+- **Android:** the APK on the Releases page.
+
 ## 5.3.0 — sleep, Charge and workouts, cleaned up (all platforms)
 
 A big bundled update that clears out a stack of reported issues in one release instead of a string of small ones. Thanks to everyone who reported these.

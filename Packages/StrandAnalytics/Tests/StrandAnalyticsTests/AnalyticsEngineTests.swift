@@ -459,4 +459,11 @@ final class AnalyticsEngineTests: XCTestCase {
         XCTAssertEqual(ScoreConfidence.rest(hasSession: true, hasStagedSleep: false), .building)
         XCTAssertEqual(ScoreConfidence.rest(hasSession: true, hasStagedSleep: true), .solid)
     }
+
+    // MARK: - #525 day with an overnight + a nap reports CONSISTENT totals
+    // #525's main-night-not-sum reconciliation is covered deterministically by the SleepStageTotals
+    // suite (testOvernightPlusNapReportsConsistentTotalsNotTheSum with explicit stage JSON, plus the
+    // three mainNightIndex selection tests). An end-to-end analyzeDay variant was dropped: it leaned on
+    // the SleepStager detecting a synthetic daytime nap, which the daytime-false-sleep guard rejects by
+    // design, so it tested detection (a #508 concern), not #525's aggregation.
 }

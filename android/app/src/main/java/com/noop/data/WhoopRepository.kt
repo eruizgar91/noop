@@ -669,6 +669,11 @@ class WhoopRepository(private val dao: WhoopDao) {
 
     // MARK: - Frontier / convenience
 
+    /** Persist HR samples directly (e.g. a live-tracked workout's 1 Hz series). Dedup-safe:
+     *  `insertHr` IGNOREs on the (deviceId, ts) primary key, so re-inserts / a later offload sync
+     *  covering the same seconds are no-ops. (#528) */
+    suspend fun insertHr(rows: List<HrSample>) = dao.insertHr(rows)
+
     suspend fun latestHrSampleTs(deviceId: String): Long? = dao.latestHrSampleTs(deviceId)
     suspend fun latestHr(deviceId: String): HrSample? = dao.latestHr(deviceId)
     suspend fun latestBattery(deviceId: String): BatterySample? = dao.latestBattery(deviceId)

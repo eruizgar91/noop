@@ -13,6 +13,12 @@ import WhoopStore
 /// effort is the running `ActiveWorkout.liveStrain` (StrainScorer over the captured window).
 struct LiveWorkoutView: View {
     @EnvironmentObject private var model: AppModel
+    /// The same shared `LiveState` the app injects at its root (StrandApp). Observed here so the additive
+    /// sensor readout (speed / cadence / power from a connected standard fitness sensor) refreshes as
+    /// packets arrive — `model.live` is its own ObservableObject, so SwiftUI wouldn't see its @Published
+    /// changes through `model` alone. HR / zone / effort still come from `model` (smoothed bpm + scorers),
+    /// untouched.
+    @EnvironmentObject private var live: LiveState
     let onClose: () -> Void
 
     /// Effort display scale (#268) — routes the live Effort read-out through the shared helper so it
@@ -31,6 +37,7 @@ struct LiveWorkoutView: View {
                 effortGauge
                 zoneRail
                 statsGrid
+                if live.hasSensorMetrics { sensorRow }
                 Spacer(minLength: 12)
                 endButton
             }
@@ -157,6 +164,29 @@ struct LiveWorkoutView: View {
                  tint: (w?.peakHr ?? 0) > 0 ? StrandPalette.metricRose : StrandPalette.textPrimary)
             stat("EFFORT", UnitFormatter.effortDisplay(w?.liveStrain ?? 0, scale: effortScale),
                  tint: StrandPalette.strainColor(w?.liveStrain ?? 0))
+        }
+    }
+
+    /// Additive readout for a connected standard fitness sensor (a footpod / bike speed-cadence sensor /
+    /// power meter) feeding RSC/CSC/CPS ALONGSIDE heart rate. Only the fields the sensor actually sent
+    /// render — each tile is dropped when its value is absent, and the whole row is hidden when nothing is
+    /// present (`live.hasSensorMetrics`), so a plain HR-only workout looks exactly as before. Honest units:
+    /// speed km/h, cadence per-minute (steps for running / rpm for cycling), power watts. Reuses the same
+    /// metric tile as the HR stats grid above; tinted with the Effort world so it reads as part of the
+    /// hero, not a competing accent. Nothing here touches HR / zone / effort.
+    private var sensorRow: some View {
+        let speed = LiveState.formatSpeedKmh(live.sensorSpeedKmh)
+        let cadence = LiveState.formatCadence(live.sensorCadence)
+        let power = LiveState.formatPowerWatts(live.sensorPowerWatts)
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("SENSOR")
+                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                .foregroundStyle(StrandPalette.textSecondary)
+            HStack(spacing: NoopMetrics.gap) {
+                if let speed { stat("SPEED", "\(speed) km/h", tint: StrandPalette.effortColor) }
+                if let cadence { stat("CADENCE", "\(cadence)/min", tint: StrandPalette.effortColor) }
+                if let power { stat("POWER", "\(power) W", tint: StrandPalette.effortColor) }
+            }
         }
     }
 

@@ -19,7 +19,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
-	<string>169</string>
+	<string>170</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.healthcare-fitness</string>
 	<key>LSMinimumSystemVersion</key>
@@ -31,5 +31,7 @@
 	</dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>NOOP connects directly to your WHOOP strap over Bluetooth to read heart rate, R-R intervals, battery, and sensor data locally on your Mac. Nothing leaves your device.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>NOOP records your route during an outdoor workout to show distance, pace, and a map. The route stays on your device. Nothing leaves it.</string>
 </dict>
 </plist>

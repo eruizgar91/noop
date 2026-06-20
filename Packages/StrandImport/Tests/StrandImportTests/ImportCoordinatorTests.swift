@@ -82,6 +82,18 @@ final class ImportCoordinatorTests: XCTestCase {
         }
     }
 
+    /// #3 (review): a genuinely missing file must surface fileNotFound, NOT get silently misrouted to the
+    /// wearable importer (which would then report a misleading "not an Oura/Fitbit/Garmin export").
+    /// detectAndImport falls through to the wearable importer ONLY for the notAZipOrFolder case.
+    func testDetectAndImportMissingFileThrowsFileNotFound() {
+        let missing = URL(fileURLWithPath: "/nonexistent/noop/import/definitely-not-here.json")
+        XCTAssertThrowsError(try ImportCoordinator().detectAndImport(from: missing)) { error in
+            guard case ImportError.fileNotFound = error else {
+                return XCTFail("expected ImportError.fileNotFound, got \(error)")
+            }
+        }
+    }
+
     func testDetectKindWhoopByFolderContents() throws {
         let folder = Fixtures.url("physiological_cycles.csv").deletingLastPathComponent()
         // The Resources folder contains BOTH whoop CSVs and export.xml. export.xml

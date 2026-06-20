@@ -13,7 +13,7 @@ import WhoopStore
 /// Classification order matters: "-noop" is checked BEFORE "whoop" because the computed id
 /// "my-whoop-noop" also contains the substring "whoop".
 enum WorkoutSource: Equatable {
-    case whoop, apple, detected, manual, lifting
+    case whoop, apple, detected, manual, lifting, activityFile
 
     /// Canonical Apple Health source id written by new imports. The early rows used the underscore
     /// spelling, so reads must accept both — see `isAppleHealth`.
@@ -25,6 +25,7 @@ enum WorkoutSource: Equatable {
         if s.hasSuffix("-noop") { return .detected }   // BEFORE whoop: "my-whoop-noop" contains "whoop"
         if s == "manual" { return .manual }
         if s == "lifting" { return .lifting }          // imported Hevy / Liftosaur strength session
+        if s == "activity-file" { return .activityFile } // imported GPX / TCX / FIT activity file
         if isAppleHealth(s) { return .apple }          // both spellings → Apple Health
         if s.contains("whoop") { return .whoop }
         return .apple

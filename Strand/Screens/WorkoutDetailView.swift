@@ -3,6 +3,9 @@ import StrandDesign
 import StrandAnalytics
 import WhoopStore
 import Foundation
+#if canImport(MapKit)
+import MapKit
+#endif
 
 // MARK: - Workout detail (#410)
 //
@@ -12,14 +15,16 @@ import Foundation
 //
 //   • a header (sport displayName · date · duration) with the source badge,
 //   • a 3-up StatTile strip (avg HR · max HR · calories / distance),
+//   • a GPS route map when the session recorded one on-device (#524) — a MapKit map of the captured
+//     polyline with start/end markers, shown only when points were actually captured,
 //   • an HR-curve ChartCard fed the workout's 5-min-ish HR buckets over [startTs, endTs],
 //   • an HR-zones bar — imported per-workout zones when the row carries them, else the window's raw
 //     HR samples binned into age-derived %HRmax zone-minutes (honestly labelled as approximate),
 //   • the session's Effort/strain contribution when one was captured.
 //
-// NO map (the read model carries no route here). Presented as a `.sheet` wrapped in a NavigationStack
-// by WorkoutsView — these screens aren't hosted in a per-screen NavigationStack, so a sheet is the
-// in-app drill-down idiom (mirrors HealthView opening MetricDetailView, StressView opening Breathe).
+// Presented as a `.sheet` wrapped in a NavigationStack by WorkoutsView — these screens aren't hosted in
+// a per-screen NavigationStack, so a sheet is the in-app drill-down idiom (mirrors HealthView opening
+// MetricDetailView, StressView opening Breathe).
 
 struct WorkoutDetailView: View {
     let row: WorkoutRow
@@ -43,11 +48,16 @@ struct WorkoutDetailView: View {
     @State private var zonesFromImport = false
     @State private var loaded = false
 
+    /// The GPS route captured for this session on-device (#524), if any. Decoded from `RouteStore` by the
+    /// row's natural key. nil = no route was recorded (honest — the map only shows when points exist).
+    @State private var route: [RouteMath.LatLng] = []
+
     var body: some View {
         ScreenScaffold(title: "\(WorkoutSource.displaySport(row.sport))",
                        subtitle: "\(dateLabel(row.startTs))") {
             headerCard
             statStrip
+            routeCard
             hrCurveCard
             zonesCard
             if let strain = row.strain {
@@ -66,6 +76,15 @@ struct WorkoutDetailView: View {
     // MARK: - Load
 
     private func load() async {
+        // #524: the GPS route, if this session recorded one on-device. A cheap UserDefaults read keyed
+        // by the row's natural key (startTs + sport); decoded to points only when ≥2 were captured so the
+        // map only ever draws a real route.
+        let routePoints: [RouteMath.LatLng] = {
+            guard let r = RouteStore.load(startTs: row.startTs, sport: row.sport) else { return [] }
+            let pts = RouteMath.decode(r.polyline)
+            return pts.count >= 2 ? pts : []
+        }()
+
         // HR curve over the exact session window — a finer bucket than the 24h chart so a short run
         // still reads as a curve, not a handful of points.
         let buckets = await repo.workoutHrBuckets(from: row.startTs, to: row.endTs)
@@ -88,6 +107,7 @@ struct WorkoutDetailView: View {
         }
 
         await MainActor.run {
+            self.route = routePoints
             self.hrPoints = points
             self.zoneMinutes = minutes
             self.zonesFromImport = fromImport
@@ -150,6 +170,71 @@ struct WorkoutDetailView: View {
                          accent: StrandPalette.metricCyan)
             }
         }
+    }
+
+    // MARK: - GPS route (#524)
+
+    /// The captured-route card: a MapKit map of the polyline with start/end markers, plus distance and
+    /// pace read off the route. Shown ONLY when ≥2 points were captured — honest "no map" otherwise (a
+    /// Mac with no GPS, denied permission, or a non-distance sport never produce a route).
+    @ViewBuilder private var routeCard: some View {
+        if route.count >= 2 {
+            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                SectionHeader("Route", overline: "Recorded on device",
+                              trailing: distanceLabel(row.distanceM))
+                NoopCard(padding: 0, tint: StrandPalette.effortColor) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        WorkoutRouteMap(points: route)
+                            .frame(height: 220)
+                            .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius,
+                                                        style: .continuous))
+                            .accessibilityLabel(routeAccessibilityLabel)
+                        HStack(spacing: 0) {
+                            routeStat("Distance", distanceLabel(row.distanceM),
+                                      tint: StrandPalette.metricCyan)
+                            routeStat("Avg pace", paceLabel, tint: StrandPalette.effortBright)
+                            routeStat("Points", "\(route.count)", tint: StrandPalette.textSecondary)
+                        }
+                        .padding(NoopMetrics.cardPadding)
+                    }
+                }
+                Text("Your GPS route for this session, recorded and stored on your device. Nothing leaves your phone.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func routeStat(_ title: String, _ value: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title.uppercased()).strandOverline()
+            Text(value)
+                .font(StrandFont.number(15))
+                .foregroundStyle(tint)
+                .lineLimit(1).minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Avg pace from the row's GPS distance + duration, in the user's unit system: "m:ss /km" (metric) or
+    /// "m:ss /mi" (imperial). "–" when distance or duration is missing/zero (pace undefined — honest).
+    private var paceLabel: String {
+        guard let m = row.distanceM, m > 0 else { return "–" }
+        let secs = row.durationS ?? Double(row.endTs - row.startTs)
+        guard secs > 0 else { return "–" }
+        let km = m / 1000.0
+        let (perUnit, label): (Double, String) = unitSystem == .imperial
+            ? (km * UnitFormatter.milesPerKilometer, "/mi")
+            : (km, "/km")
+        guard perUnit > 0 else { return "–" }
+        let secsPerUnit = Int((secs / perUnit).rounded())
+        return "\(secsPerUnit / 60):\(String(format: "%02d", secsPerUnit % 60)) \(label)"
+    }
+
+    private var routeAccessibilityLabel: String {
+        let dist = distanceLabel(row.distanceM)
+        return "Map of your \(WorkoutSource.displaySport(row.sport)) route, \(dist)."
     }
 
     // MARK: - HR curve
@@ -300,6 +385,7 @@ struct WorkoutDetailView: View {
             case .detected: return ("Detected", StrandPalette.metricPurple)
             case .manual:   return ("Manual", StrandPalette.statusWarning)
             case .lifting:  return ("Lifting", StrandPalette.zone2)
+            case .activityFile: return ("File", StrandPalette.metricAmber)
             }
         }()
         return SourceBadge("\(label)", tint: tint)
@@ -353,6 +439,104 @@ struct WorkoutDetailView: View {
         let f = NumberFormatter(); f.numberStyle = .decimal; f.maximumFractionDigits = 0; return f
     }()
 }
+
+// MARK: - Route map (#524)
+//
+// A MapKit map of the captured route polyline, drawn with start (green) + end (red) markers — the Apple
+// analogue of Android's `RouteCanvas`, but on real map tiles. Built as a platform-bridged representable
+// around `MKMapView` so it runs on BOTH iOS 17 and macOS 13 (SwiftUI's newer `Map { MapPolyline }` needs
+// iOS 17 / macOS 14, and the macOS deployment target is 13). The map is offline-capable: MapKit caches
+// tiles locally and the route itself is on-device — NOOP never sends the route anywhere.
+
+#if canImport(MapKit) && canImport(UIKit)
+import UIKit
+typealias RouteMapRepresentable = UIViewRepresentable
+#elseif canImport(MapKit) && canImport(AppKit)
+import AppKit
+typealias RouteMapRepresentable = NSViewRepresentable
+#endif
+
+#if canImport(MapKit)
+struct WorkoutRouteMap: RouteMapRepresentable {
+    let points: [RouteMath.LatLng]
+
+    private var coordinates: [CLLocationCoordinate2D] {
+        points.map { CLLocationCoordinate2D(latitude: $0.lat, longitude: $0.lon) }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    private func makeMap(context: Context) -> MKMapView {
+        let map = MKMapView()
+        map.delegate = context.coordinator
+        map.isRotateEnabled = false
+        map.isPitchEnabled = false
+        map.showsUserLocation = false
+        configure(map)
+        return map
+    }
+
+    /// Draw the polyline + start/end pins and frame the route. Replaces any existing overlays so a
+    /// re-render doesn't stack them.
+    private func configure(_ map: MKMapView) {
+        map.removeOverlays(map.overlays)
+        map.removeAnnotations(map.annotations)
+        let coords = coordinates
+        guard coords.count >= 2 else { return }
+        let line = MKPolyline(coordinates: coords, count: coords.count)
+        map.addOverlay(line)
+
+        let start = MKPointAnnotation(); start.coordinate = coords.first!; start.title = "Start"
+        let end = MKPointAnnotation(); end.coordinate = coords.last!; end.title = "Finish"
+        map.addAnnotations([start, end])
+
+        // Frame the whole route with a little padding so the line isn't flush to the edges.
+        let rect = line.boundingMapRect
+        let inset = UIEdgeInsetsLikePadding
+        map.setVisibleMapRect(rect, edgePadding: inset, animated: false)
+    }
+
+    final class Coordinator: NSObject, MKMapViewDelegate {
+        func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
+            guard let line = overlay as? MKPolyline else { return MKOverlayRenderer(overlay: overlay) }
+            let r = MKPolylineRenderer(polyline: line)
+            // Effort-amber world, matching the rest of the workout detail. A platform colour (the
+            // renderer needs a UIColor/NSColor, not a SwiftUI Color); kept close to the Effort accent.
+            r.strokeColor = RoutePlatformColor.effort
+            r.lineWidth = 4
+            r.lineJoin = .round
+            r.lineCap = .round
+            return r
+        }
+    }
+
+    #if canImport(UIKit)
+    private var UIEdgeInsetsLikePadding: UIEdgeInsets { UIEdgeInsets(top: 24, left: 24, bottom: 24, right: 24) }
+    func makeUIView(context: Context) -> MKMapView { makeMap(context: context) }
+    func updateUIView(_ map: MKMapView, context: Context) { configure(map) }
+    #elseif canImport(AppKit)
+    private var UIEdgeInsetsLikePadding: NSEdgeInsets { NSEdgeInsets(top: 24, left: 24, bottom: 24, right: 24) }
+    func makeNSView(context: Context) -> MKMapView { makeMap(context: context) }
+    func updateNSView(_ map: MKMapView, context: Context) { configure(map) }
+    #endif
+}
+
+/// The route stroke colour as a platform colour (MapKit's renderer can't take a SwiftUI `Color`). A fixed
+/// Effort-amber so it reads in the same colour world as the rest of the screen on both platforms.
+private enum RoutePlatformColor {
+    #if canImport(UIKit)
+    static let effort = UIColor(red: 0.98, green: 0.62, blue: 0.16, alpha: 1.0)
+    #elseif canImport(AppKit)
+    static let effort = NSColor(red: 0.98, green: 0.62, blue: 0.16, alpha: 1.0)
+    #endif
+}
+#else
+/// Platforms without MapKit (none we ship, but keeps the type resolvable): no route map.
+struct WorkoutRouteMap: View {
+    let points: [RouteMath.LatLng]
+    var body: some View { Color.clear }
+}
+#endif
 
 #if DEBUG
 #Preview("Workout Detail") {

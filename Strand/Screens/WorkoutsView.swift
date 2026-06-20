@@ -161,6 +161,9 @@ struct WorkoutsView: View {
         // shows). activeWorkout is global on AppModel, so ending it from either surface stays in sync.
         .sheet(isPresented: $showLiveWorkout) {
             LiveWorkoutView(onClose: { showLiveWorkout = false })
+                // Inject the shared live snapshot so the in-exercise sensor readout (speed/cadence/power)
+                // resolves here too, matching how LiveView presents the same screen.
+                .environmentObject(model.live)
         }
         // #519: name the sport before a live session starts, then open the in-exercise view directly
         // (same direct present as the button's already-active path — no cross-view auto-present race).
@@ -244,6 +247,9 @@ struct WorkoutsView: View {
     }
 
     private func delete(_ row: WorkoutRow) {
+        // #524: also drop any on-device GPS route stored under this session's natural key, so deleting a
+        // workout doesn't leave its route orphaned in the RouteStore side-store.
+        RouteStore.remove(startTs: row.startTs, sport: row.sport)
         Task { await repo.deleteWorkout(row); await reload() }
     }
 
@@ -791,7 +797,7 @@ struct WorkoutsView: View {
             Button("Edit…") { editWorkout(row) }
             Divider()
             Button("Delete", role: .destructive) { delete(row) }
-        case .whoop, .apple, .lifting:
+        case .whoop, .apple, .lifting, .activityFile:
             // Imported history is read-only; offer a copy-to-manual edit path that doesn't touch it.
             Button("Duplicate as manual…") { editWorkout(asManualCopy(row)) }
         }
@@ -824,6 +830,7 @@ struct WorkoutsView: View {
             case .detected: return ("Detected", StrandPalette.metricPurple, "Source on-device detected")
             case .manual:   return ("Manual", StrandPalette.statusWarning, "Source manual entry")
             case .lifting:  return ("Lifting", StrandPalette.zone2, "Source imported lifting log")
+            case .activityFile: return ("File", StrandPalette.metricAmber, "Source imported activity file")
             }
         }()
         // String interpolation lifts the computed label into a LocalizedStringKey (SourceBadge's type).

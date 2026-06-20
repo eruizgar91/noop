@@ -15,11 +15,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.DirectionsRun
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.RemoveCircleOutline
 import androidx.compose.material.icons.filled.Watch
@@ -52,6 +54,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noop.ble.SourceCoordinator
 import com.noop.data.DeviceStatus
 import com.noop.data.PairedDeviceRow
+import com.noop.data.SourceKind
 import kotlinx.coroutines.launch
 
 // MARK: - Devices
@@ -112,6 +115,10 @@ fun DevicesScreen(viewModel: AppViewModel) {
                 device = device,
                 isActive = device.status == DeviceStatus.active.name,
                 isLiveConnected = device.status == DeviceStatus.active.name && live.connected,
+                // The live battery belongs to whichever device is ACTIVE + connected (WHOOP, a generic
+                // strap, or an FTMS machine all funnel into live.batteryPct). null otherwise.
+                liveBatteryPct = if (device.status == DeviceStatus.active.name && live.connected)
+                    live.batteryPct?.let { Math.round(it).toInt() } else null,
                 onMakeActive = { switchTarget = device },
                 onRename = { renameTarget = device },
                 onRemove = { removeTarget = device },
@@ -239,6 +246,9 @@ private fun DeviceCard(
     isActive: Boolean,
     isLiveConnected: Boolean,
     dimmed: Boolean = false,
+    /** The active+connected device's live battery percent (0–100) — surfaced the same way for WHOOP, a
+     *  generic strap, or an FTMS machine. null when not active/connected or no battery was reported. */
+    liveBatteryPct: Int? = null,
     onMakeActive: () -> Unit,
     onRename: () -> Unit,
     onRemove: (() -> Unit)?,
@@ -284,7 +294,8 @@ private fun DeviceCard(
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    lastSeenLine(device, isLiveConnected),
+                    lastSeenLine(device, isLiveConnected) +
+                        (liveBatteryPct?.let { " · Battery $it%" } ?: ""),
                     style = NoopType.footnote,
                     color = Palette.textTertiary,
                     modifier = Modifier.weight(1f),
@@ -603,9 +614,14 @@ internal fun displayName(device: PairedDeviceRow): String {
     else "${device.brand} ${device.model}"
 }
 
-/** SF-Symbol-equivalent icon: WHOOP keeps the band glyph; generic straps read as a heart-rate strap. */
-private fun deviceIcon(device: PairedDeviceRow): ImageVector =
-    if (SourceCoordinator.isWhoop(device)) Icons.Filled.Watch else Icons.Filled.FavoriteBorder
+/** SF-Symbol-equivalent icon: WHOOP keeps the band glyph; an FTMS machine reads as gym equipment;
+ *  generic straps read as a heart-rate strap. */
+private fun deviceIcon(device: PairedDeviceRow): ImageVector = when {
+    device.sourceKind == SourceKind.ftms.name -> Icons.AutoMirrored.Filled.DirectionsRun
+    device.sourceKind == SourceKind.huami.name -> Icons.Filled.GraphicEq
+    SourceCoordinator.isWhoop(device) -> Icons.Filled.Watch
+    else -> Icons.Filled.FavoriteBorder
+}
 
 /**
  * Honest, per-model capability + function summary for a device card — mirrors the Swift
@@ -622,6 +638,28 @@ private data class DeviceCapabilityProfile(
 )
 
 private fun deviceProfile(device: PairedDeviceRow): DeviceCapabilityProfile {
+    // FTMS gym machine: a live machine + (when reported) HR session, recorded via the existing
+    // live-workout path. Effort-scored only when the machine actually reports heart rate.
+    if (device.sourceKind == SourceKind.ftms.name) {
+        return DeviceCapabilityProfile(
+            displayModel = "Gym equipment (FTMS)",
+            captures = "Speed · Cadence · Power · Distance · Energy · Heart rate (if the machine sends it)",
+            powers = "Records a live machine workout — Effort-scored from HR when the machine reports it",
+            footnote = "Live machine data over Bluetooth FTMS. No sleep, recovery, skin temp or SpO₂. " +
+                "Effort needs the machine's heart rate; without it the session logs the machine metrics only.",
+        )
+    }
+    // EXPERIMENTAL Huami device (Amazfit / Zepp / Mi Band): best-effort live HR only, honest about it.
+    if (device.sourceKind == SourceKind.huami.name) {
+        return DeviceCapabilityProfile(
+            displayModel = "${device.brand} (experimental)",
+            captures = "Heart rate (live, best-effort)",
+            powers = "Powers the live console + Effort — no Charge, Rest or Sleep",
+            footnote = "Experimental: live heart rate where the band exposes it. Some bands need a pairing " +
+                "we can't do yet — NOOP will say so honestly and never show a made-up number. No sleep, " +
+                "recovery, skin temp, SpO₂ or steps.",
+        )
+    }
     // Generic heart-rate strap: live HR + R-R only; drives the live console + Effort, nothing nightly.
     if (!SourceCoordinator.isWhoop(device)) {
         return DeviceCapabilityProfile(

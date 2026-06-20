@@ -55,6 +55,58 @@ public final class LiveState: ObservableObject {
     /// Wrist-wear state from WRIST_ON/WRIST_OFF events. Defaults true so wear-gated features work
     /// before the first event arrives; flipped by FrameRouter on a real event.
     @Published public var worn: Bool = true
+
+    // MARK: - Standard fitness-sensor live metrics (RSC / CSC / CPS — additive, never HR)
+    //
+    // Live instantaneous speed / cadence / power from a connected standard fitness sensor (a footpod, a
+    // bike speed/cadence sensor, a power meter) read ALONGSIDE the HR profile by `StandardHRSource`. These
+    // are a PURE ADDITIVE surface for the in-exercise readout: they never touch `heartRate`, `rr`, or any
+    // scoring input — a workout is still recorded by the existing HR-driven live-workout flow. nil when no
+    // such sensor is connected / before its first packet; cleared on disconnect so a stale panel can't
+    // outlive the link. Honest: speed/cadence from CSC/CPS are DERIVED from successive packets, so they
+    // appear only once two have arrived.
+
+    /// Instantaneous speed in km/h from a connected RSC/CSC/CPS sensor (RSC direct; CSC/CPS derived).
+    @Published public var sensorSpeedKmh: Double? = nil
+    /// Instantaneous cadence — running steps/min (RSC) or crank rpm (CSC/CPS) — from a connected sensor.
+    @Published public var sensorCadence: Double? = nil
+    /// Instantaneous power in watts from a connected cycling-power (CPS) sensor.
+    @Published public var sensorPowerWatts: Int? = nil
+
+    /// Clear the standard fitness-sensor live metrics (called on disconnect / source teardown), the twin
+    /// of `clearBiometrics()` for the additive sensor surface. Leaves HR + R-R untouched.
+    public func clearSensorMetrics() {
+        sensorSpeedKmh = nil
+        sensorCadence = nil
+        sensorPowerWatts = nil
+    }
+
+    /// True when ANY standard fitness-sensor metric is currently present — drives whether the additive
+    /// in-workout sensor readout shows at all (it stays hidden until a real sensor feeds a value, so a
+    /// workout with only HR looks exactly as it does today).
+    public var hasSensorMetrics: Bool {
+        sensorSpeedKmh != nil || sensorCadence != nil || sensorPowerWatts != nil
+    }
+
+    /// Pure, honest display strings for the additive in-workout sensor readout. Each returns nil when the
+    /// sensor hasn't sent that field (the UI then hides the tile rather than showing a fabricated value).
+    /// Units are the sensor's native ones, no unit-conversion guessing: speed km/h (the decode/derivation
+    /// unit), cadence per-minute (steps/min for a footpod, crank rpm for a bike sensor — both "/min", and
+    /// LiveState doesn't carry the kind, so the neutral honest label is used), power watts. Mirrors the
+    /// JVM-tested Kotlin `StandardHrSource.formatSensor*` so the two platforms read identically. `static`
+    /// so they're trivially unit-testable away from the @MainActor instance.
+    static func formatSpeedKmh(_ kmh: Double?) -> String? {
+        guard let kmh, kmh.isFinite, kmh >= 0 else { return nil }
+        return String(format: "%.1f", kmh)
+    }
+    static func formatCadence(_ perMin: Double?) -> String? {
+        guard let perMin, perMin.isFinite, perMin >= 0 else { return nil }
+        return String(Int(perMin.rounded()))
+    }
+    static func formatPowerWatts(_ watts: Int?) -> String? {
+        guard let watts, watts >= 0 else { return nil }
+        return String(watts)
+    }
     /// Rolling log of human-readable lines for the on-device verification checklist.
     @Published public var log: [String] = []
 

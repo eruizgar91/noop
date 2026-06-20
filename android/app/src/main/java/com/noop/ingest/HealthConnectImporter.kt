@@ -157,6 +157,8 @@ object HealthConnectImporter {
         val end = Instant.now()
         val start = LocalDate.now(zone).minusYears(WINDOW_YEARS).atStartOfDay(zone).toInstant()
         val filter = TimeRangeFilter.between(start, end)
+        // #528: skip our own writes on import (see readAll / isSelfWritten).
+        val selfPackage = context.packageName
 
         // Per-day accumulators. Keyed by "YYYY-MM-DD" (local).
         val acc = HashMap<String, DayAcc>()
@@ -171,20 +173,20 @@ object HealthConnectImporter {
 
         try {
             // --- Steps ---
-            readAll(client, StepsRecord::class, filter) { r ->
+            readAll(client, StepsRecord::class, filter, selfPackage) { r ->
                 bucket(dayOf(r.startTime)).steps += r.count
             }
             // --- Total calories burned (basal + active) ---
-            readAll(client, TotalCaloriesBurnedRecord::class, filter) { r ->
+            readAll(client, TotalCaloriesBurnedRecord::class, filter, selfPackage) { r ->
                 bucket(dayOf(r.startTime)).totalKcal += r.energy.inKilocalories
             }
             // --- Active calories burned ---
-            readAll(client, ActiveCaloriesBurnedRecord::class, filter) { r ->
+            readAll(client, ActiveCaloriesBurnedRecord::class, filter, selfPackage) { r ->
                 bucket(dayOf(r.startTime)).activeKcal += r.energy.inKilocalories
                 activeKcalRecords.add(Triple(r.startTime.epochSecond, r.endTime.epochSecond, r.energy.inKilocalories))
             }
             // --- Heart rate (instantaneous samples) -> per-day average ---
-            readAll(client, HeartRateRecord::class, filter) { r ->
+            readAll(client, HeartRateRecord::class, filter, selfPackage) { r ->
                 for (s in r.samples) {
                     val b = bucket(dayOf(s.time))
                     b.hrSum += s.beatsPerMinute
@@ -192,19 +194,19 @@ object HealthConnectImporter {
                 }
             }
             // --- Resting heart rate -> per-day average (rounded to Int) ---
-            readAll(client, RestingHeartRateRecord::class, filter) { r ->
+            readAll(client, RestingHeartRateRecord::class, filter, selfPackage) { r ->
                 val b = bucket(dayOf(r.time))
                 b.rhrSum += r.beatsPerMinute
                 b.rhrCount += 1
             }
             // --- HRV (RMSSD, ms) -> per-day average ---
-            readAll(client, HeartRateVariabilityRmssdRecord::class, filter) { r ->
+            readAll(client, HeartRateVariabilityRmssdRecord::class, filter, selfPackage) { r ->
                 val b = bucket(dayOf(r.time))
                 b.hrvSum += r.heartRateVariabilityMillis
                 b.hrvCount += 1
             }
             // --- Sleep sessions -> per-day total sleep minutes, assigned to the WAKE day ---
-            readAll(client, SleepSessionRecord::class, filter) { r ->
+            readAll(client, SleepSessionRecord::class, filter, selfPackage) { r ->
                 val day = dayOf(r.endTime)
                 val b = bucket(day)
                 // Prefer summed asleep-stage minutes; fall back to session span when no stages.
@@ -215,19 +217,19 @@ object HealthConnectImporter {
                 b.hasSleep = true
             }
             // --- SpO2 (%) -> per-day average ---
-            readAll(client, OxygenSaturationRecord::class, filter) { r ->
+            readAll(client, OxygenSaturationRecord::class, filter, selfPackage) { r ->
                 val b = bucket(dayOf(r.time))
                 b.spo2Sum += r.percentage.value
                 b.spo2Count += 1
             }
             // --- Respiratory rate (breaths/min) -> per-day average ---
-            readAll(client, RespiratoryRateRecord::class, filter) { r ->
+            readAll(client, RespiratoryRateRecord::class, filter, selfPackage) { r ->
                 val b = bucket(dayOf(r.time))
                 b.respSum += r.rate
                 b.respCount += 1
             }
             // --- VO2 max (ml/kg/min) -> latest value of the day wins ---
-            readAll(client, Vo2MaxRecord::class, filter) { r ->
+            readAll(client, Vo2MaxRecord::class, filter, selfPackage) { r ->
                 val b = bucket(dayOf(r.time))
                 if (r.time.epochSecond >= b.vo2maxTs) {
                     b.vo2max = r.vo2MillilitersPerMinuteKilogram
@@ -235,7 +237,7 @@ object HealthConnectImporter {
                 }
             }
             // --- Weight (kg) -> latest value of the day wins ---
-            readAll(client, WeightRecord::class, filter) { r ->
+            readAll(client, WeightRecord::class, filter, selfPackage) { r ->
                 val b = bucket(dayOf(r.time))
                 if (r.time.epochSecond >= b.weightTs) {
                     b.weightKg = r.weight.inKilograms
@@ -243,7 +245,7 @@ object HealthConnectImporter {
                 }
             }
             // --- Exercise sessions -> WorkoutRow(source="health-connect") ---
-            readAll(client, ExerciseSessionRecord::class, filter) { r ->
+            readAll(client, ExerciseSessionRecord::class, filter, selfPackage) { r ->
                 val startS = r.startTime.epochSecond
                 val endS = r.endTime.epochSecond
                 workouts.add(
@@ -284,6 +286,7 @@ object HealthConnectImporter {
                     TimeRangeFilter.between(
                         Instant.ofEpochSecond(w.startTs), Instant.ofEpochSecond(w.endTs)
                     ),
+                    selfPackage,
                 ) { hr ->
                     for (s in hr.samples) {
                         sum += s.beatsPerMinute
@@ -323,6 +326,7 @@ object HealthConnectImporter {
                         Instant.ofEpochSecond(ws - DISTANCE_MATCH_BUFFER_S),
                         Instant.ofEpochSecond(we + DISTANCE_MATCH_BUFFER_S),
                     ),
+                    selfPackage,
                 ) { d ->
                     val rs = d.startTime.epochSecond
                     val re = d.endTime.epochSecond
@@ -487,11 +491,13 @@ object HealthConnectImporter {
         val today = LocalDate.now(zone)
         val dayKey = today.toString()
         var sum = 0L
+        val selfPackage = context.packageName // #528: skip our own writes (see readAll / isSelfWritten)
         // readAll swallows a failed read (sum stays 0), so a flaky provider degrades to the stored
         // row below rather than clobbering it with zero.
         readAll(
             client, StepsRecord::class,
             TimeRangeFilter.between(today.atStartOfDay(zone).toInstant(), Instant.now()),
+            selfPackage,
         ) { r ->
             // The filter matches by overlap — drop records that STARTED yesterday so the bucketing
             // agrees with [import]'s dayOf(r.startTime).
@@ -527,6 +533,7 @@ object HealthConnectImporter {
         client: HealthConnectClient,
         type: KClass<T>,
         filter: TimeRangeFilter,
+        selfPackage: String = "",
         onRecord: (T) -> Unit,
     ) {
         var pageToken: String? = null
@@ -540,7 +547,12 @@ object HealthConnectImporter {
                         pageToken = pageToken,
                     )
                 )
-                for (record in response.records) onRecord(record)
+                for (record in response.records) {
+                    // #528: never re-ingest what NOOP itself wrote to Health Connect, or "share back"
+                    // + import would double-count our own daily totals (steps / active energy / sleep).
+                    if (isSelfWritten(record.metadata.dataOrigin.packageName, selfPackage)) continue
+                    onRecord(record)
+                }
                 pageToken = response.pageToken
             } while (pageToken != null)
         } catch (e: Exception) {
@@ -596,6 +608,16 @@ object HealthConnectImporter {
         SleepSessionRecord.STAGE_TYPE_REM,
         SleepSessionRecord.STAGE_TYPE_SLEEPING, // generic "asleep" with no sub-stage
     )
+
+    /**
+     * #528 — true when a record's origin is NOOP itself, so [readAll] skips it on import. Without this,
+     * turning on "share back" makes a later import re-read NOOP's own daily totals and SUM them on top
+     * of the original source records (cumulative steps / active energy / sleep would ~double). HC's
+     * `dataOriginFilter` is include-only, so the exclusion has to be a code-level package check here.
+     * Empty [selfPackage] (origin undeterminable) never skips, so we err toward keeping data.
+     */
+    internal fun isSelfWritten(originPackage: String, selfPackage: String): Boolean =
+        selfPackage.isNotEmpty() && originPackage == selfPackage
 
     /** Derive basal kcal = total − active when both are present and positive; else null. */
     private fun basalKcal(a: DayAcc): Double? {

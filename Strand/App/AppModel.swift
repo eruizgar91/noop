@@ -77,6 +77,19 @@ final class AppModel: ObservableObject {
     /// The just-ended workout, for a brief inline confirmation on Live (cleared on the next start).
     @Published var lastWorkout: WorkoutRow?
 
+    /// Records the GPS route of an in-flight distance-type workout (run / ride / walk / hike) from
+    /// CoreLocation (#524) — the Apple analogue of Android's `GpsSession` + foreground `LocationManager`.
+    /// Fails safe: on a Mac with no GPS, or when location permission is denied, it records nothing and
+    /// the session still banks HR + Effort without a route. Observed by the live workout card for live
+    /// distance/pace; its final route is persisted on End via `RouteStore`, keyed by the saved row's
+    /// natural key (the shared `WorkoutRow` has no route column on Apple). Default behaviour is opt-in by
+    /// sport: it only arms for a `WorkoutCatalog.Sport.isDistanceSport`, and only actually captures once
+    /// the user grants When-In-Use location.
+    let gpsRecorder = GpsWorkoutRecorder()
+    /// True while the active workout is a GPS-type session (drives the End-time route persist). Mirrors
+    /// Android's `ActiveWorkout.gpsEnabled`.
+    private var activeWorkoutIsGps = false
+
     /// A manual workout in progress. `samples` accumulate from the smoothed live `bpm`; `liveStrain`
     /// is recomputed as the window grows so the active card can show strain building in real time.
     struct ActiveWorkout: Equatable {
@@ -232,6 +245,9 @@ final class AppModel: ObservableObject {
             .map { Date(timeIntervalSince1970: $0) }
         sleepMarks = (UserDefaults.standard.array(forKey: "sleepMarks") as? [Double] ?? [])
             .map { Date(timeIntervalSince1970: $0) }
+        // Rehydrate a manual workout that was in flight when iOS killed the app, so it can still be ended
+        // + saved on relaunch (#529). Restored here alongside the other UserDefaults-backed state.
+        rehydrateActiveWorkout()
 
         AppModel.shared = self   // publish for App Intents (Shortcuts) — see the static above (#42)
 
@@ -362,32 +378,104 @@ final class AppModel: ObservableObject {
         guard activeWorkout == nil else { return }
         lastWorkout = nil
         let name = sport.trimmingCharacters(in: .whitespaces)
-        activeWorkout = ActiveWorkout(start: Date(),
-                                      sport: name.isEmpty ? WorkoutCatalog.defaultSportName : name)
+        let resolved = name.isEmpty ? WorkoutCatalog.defaultSportName : name
+        let started = Date()
+        activeWorkout = ActiveWorkout(start: started, sport: resolved)
+        // #524: arm GPS route recording for a distance-type sport (run / ride / walk / hike), mirroring
+        // Android, which defaults GPS on for `isDistanceSport`. Manual-first / opt-in: only these sports
+        // record a route, and the recorder still captures nothing unless the user grants When-In-Use
+        // location (and on a Mac with no GPS it stays empty) — the session always banks HR + Effort
+        // regardless. A non-distance sport (yoga, strength) never touches location at all.
+        activeWorkoutIsGps = WorkoutCatalog.sport(named: resolved)?.isDistanceSport ?? false
+        if activeWorkoutIsGps {
+            gpsRecorder.start(startMs: Int64(started.timeIntervalSince1970 * 1000))
+        }
+        // Make the session durable from the first instant (#529): persist it now so an OS kill right
+        // after Start — before any HR sample lands — can still be rehydrated + ended on relaunch.
+        persistActiveWorkout()
         buzz(loops: 1)
     }
 
-    /// Finish the active workout: score the captured HR window and save it as a `WorkoutRow`. A session
-    /// with too few samples (never streamed HR) is discarded quietly. Double-buzz confirms the save.
+    /// Persist the in-flight manual workout to `UserDefaults` so it survives the app being killed mid-
+    /// session (#529). Called on start + each captured sample. A no-op when nothing is running. Apple has
+    /// no GPS-route session, so every manual workout is the "non-GPS" case and gets this durability —
+    /// the Apple analogue of Android's `persistNonGpsWorkout`.
+    private func persistActiveWorkout() {
+        guard let w = activeWorkout else { return }
+        ActiveWorkoutPersistence.store(
+            ActiveWorkoutPersistence.Snapshot(
+                startSec: Int(w.start.timeIntervalSince1970),
+                sport: w.sport,
+                samples: w.samples,
+                avgHr: w.avgHr,
+                peakHr: w.peakHr,
+                liveStrain: w.liveStrain))
+    }
+
+    /// If a manual workout was in flight when iOS killed the app, rebuild `activeWorkout` from the durable
+    /// snapshot so reopening doesn't lose it — the session can still be ended + saved (#529). The Apple
+    /// analogue of Android's `rehydrateActiveNonGpsWorkout`. No-op when a workout is already live (a live
+    /// session wins over a stale snapshot) or nothing is stored. Called once from `init`.
+    private func rehydrateActiveWorkout() {
+        guard activeWorkout == nil, let snap = ActiveWorkoutPersistence.load() else { return }
+        var w = ActiveWorkout(start: Date(timeIntervalSince1970: TimeInterval(snap.startSec)),
+                              sport: snap.sport)
+        w.samples = snap.samples
+        w.avgHr = snap.avgHr
+        w.peakHr = snap.peakHr
+        w.liveStrain = snap.liveStrain
+        activeWorkout = w
+    }
+
+    /// Finish the active workout: finalize the GPS route (#524), score the captured HR window, and save it
+    /// as a `WorkoutRow`. A session with no HR window AND no real GPS route is discarded quietly (parity
+    /// with Android) — but a GPS-only walk with HR not streaming still saves. Double-buzz confirms.
     func endWorkout() {
         guard let w = activeWorkout else { return }
         activeWorkout = nil
+        let wasGps = activeWorkoutIsGps
+        activeWorkoutIsGps = false
+        // Drop the durable snapshot the instant the session ends — whether it saves below or is discarded
+        // as too-short — so a relaunch never rehydrates an already-finished session (#529).
+        ActiveWorkoutPersistence.clear()
+        // #524: finalize the GPS route. Stop the recorder and take its captured route — it kept
+        // accumulating from CoreLocation independently of the HR window. `capturedRoute()` is nil unless
+        // ≥2 points actually landed (honest: no route, no distance, when nothing was captured — e.g. a
+        // Mac with no GPS, or denied permission). A non-GPS session never armed the recorder.
+        var route: WorkoutRoute?
+        if wasGps {
+            gpsRecorder.stop()
+            route = gpsRecorder.capturedRoute()
+        }
         let samples = w.samples
-        guard samples.count >= 2 else { lastWorkout = nil; return }
+        // Save when there's an HR window OR a real GPS route — a GPS-only walk (HR not streaming) is
+        // still a workout (parity with Android's `samples.size < 2 && track.size < 2` discard gate).
+        guard samples.count >= 2 || route != nil else { lastWorkout = nil; return }
         let end = Date()
-        let avg = Int((Double(samples.map(\.bpm).reduce(0, +)) / Double(samples.count)).rounded())
-        let peak = samples.map(\.bpm).max() ?? 0
-        let strain = StrainScorer.strain(samples, maxHR: Double(profile.hrMax), sex: profile.sex)
+        let avg = samples.isEmpty ? nil
+            : Int((Double(samples.map(\.bpm).reduce(0, +)) / Double(samples.count)).rounded())
+        let peak = samples.map(\.bpm).max()
+        let strain = samples.count >= 2
+            ? StrainScorer.strain(samples, maxHR: Double(profile.hrMax), sex: profile.sex) : nil
         // Estimate calories from the captured HR window (same Keytel/Harris–Benedict model the
         // auto-detector uses) so a manual session shows energy too, not just duration/strain. (#117)
         let up = UserProfile(weightKg: profile.weightKg, heightCm: profile.heightCm,
                              age: Double(profile.age), sex: profile.sex)
-        let kcal = Calories.estimateBoutCalories(samples, profile: up, hrmax: Double(profile.hrMax), restingHR: nil).0
+        let kcal = samples.count >= 2
+            ? Calories.estimateBoutCalories(samples, profile: up, hrmax: Double(profile.hrMax), restingHR: nil).0
+            : 0
+        let startTs = Int(w.start.timeIntervalSince1970)
         let row = WorkoutRow(
-            startTs: Int(w.start.timeIntervalSince1970), endTs: Int(end.timeIntervalSince1970),
+            startTs: startTs, endTs: Int(end.timeIntervalSince1970),
             sport: w.sport, source: "manual", durationS: end.timeIntervalSince(w.start),
             energyKcal: kcal > 0 ? kcal : nil, avgHr: avg, maxHr: peak, strain: strain,
-            distanceM: nil, zonesJSON: nil, notes: nil)
+            // GPS distance rides the shared row so the Workouts list / detail show it like any other
+            // distance workout; the polyline itself is persisted alongside in RouteStore (the shared
+            // WorkoutRow has no route column on Apple). Only a real route sets distance — honest "—".
+            distanceM: route?.distanceM, zonesJSON: nil, notes: nil)
+        // Persist the route polyline under the row's natural key so WorkoutDetailView can draw it. On
+        // device only; mirrors the moments / sleepMarks UserDefaults persistence. (#524)
+        if let route { RouteStore.store(route, startTs: startTs, sport: w.sport) }
         lastWorkout = row
         buzz(loops: 2)
         Task { [weak self] in
@@ -409,6 +497,8 @@ final class AppModel: ObservableObject {
         w.avgHr = Int((Double(w.samples.map(\.bpm).reduce(0, +)) / Double(w.samples.count)).rounded())
         w.liveStrain = StrainScorer.strain(w.samples, maxHR: Double(profile.hrMax), sex: profile.sex) ?? 0
         activeWorkout = w
+        // Re-snapshot the durable session so a kill keeps the latest accumulated HR window (#529).
+        persistActiveWorkout()
     }
 
     /// Drop the smoothing window and blank the hero number so a resume / re-attach shows "—"
@@ -567,12 +657,43 @@ final class AppModel: ObservableObject {
     /// fires even if the Mac is asleep / NOOP is closed. No-op until bonded (send is gated on bond).
     func applySmartAlarm() {
         guard behavior.smartAlarmEnabled else { ble.disableStrapAlarm(); return }
-        let cal = Calendar.current
-        let now = Date()
-        var next = cal.date(bySettingHour: behavior.smartAlarmMinutes / 60,
-                            minute: behavior.smartAlarmMinutes % 60, second: 0, of: now) ?? now
-        if next <= now { next = cal.date(byAdding: .day, value: 1, to: next) ?? next }
+        guard let next = Self.nextSmartAlarmDate(minutes: behavior.smartAlarmMinutes,
+                                                 weekdays: behavior.smartAlarmWeekdays) else {
+            // No enabled weekday in the next week (only possible from a corrupted set) — disarm rather
+            // than arm a misleading time the user never asked for.
+            ble.disableStrapAlarm(); return
+        }
         ble.armStrapAlarm(at: next)
+    }
+
+    /// Compute the next fire date for the smart alarm, honouring the weekday selection.
+    /// - `minutes`: target wake time, minutes since local midnight.
+    /// - `weekdays`: Calendar weekday numbers (1 = Sun … 7 = Sat) the alarm may fire on. Empty = every
+    ///   day. Days outside 1…7 are ignored.
+    /// Returns the next strictly-future date matching the time on an enabled weekday, scanning today
+    /// plus the next 7 days, or nil if no enabled weekday falls in that range. Pure + side-effect-free
+    /// so it can be unit-tested against a fixed clock.
+    nonisolated static func nextSmartAlarmDate(minutes: Int,
+                                               weekdays: Set<Int>,
+                                               from now: Date = Date(),
+                                               calendar cal: Calendar = .current) -> Date? {
+        let valid = weekdays.filter { (1...7).contains($0) }
+        // An empty input means "every day" (backward compatible). A non-empty selection that filters to
+        // nothing (only out-of-range numbers) has no valid day to fire on, so it's nil, not a daily alarm.
+        if !weekdays.isEmpty && valid.isEmpty { return nil }
+        let hour = minutes / 60
+        let minute = minutes % 60
+        // Scan today (offset 0) through +7 days so a once-a-week alarm picked for "today, already
+        // passed" still resolves to the same weekday next week.
+        for offset in 0...7 {
+            guard let day = cal.date(byAdding: .day, value: offset, to: now),
+                  let fire = cal.date(bySettingHour: hour, minute: minute, second: 0, of: day)
+            else { continue }
+            if fire <= now { continue }
+            if weekdays.isEmpty { return fire }
+            if valid.contains(cal.component(.weekday, from: fire)) { return fire }
+        }
+        return nil
     }
 
     /// Re-arms the single-instant firmware alarm once per day (just after local midnight) so a

@@ -14,6 +14,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.DirectionsRun
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.FileDownload
@@ -71,21 +72,32 @@ import kotlinx.coroutines.launch
 
 /** What the user is adding. Drives the prep copy AND which scan/register path runs. */
 private enum class DeviceType {
-    Whoop5MG, Whoop4, HrStrap;
+    Whoop5MG, Whoop4, HrStrap, GymEquipment,
+    // EXPERIMENTAL tier — best-effort, clean-room, can't be hardware-verified here. Each fails to an
+    // honest message and never fabricates data.
+    Amazfit, MiBand, Garmin, Oura;
 
     val isWhoop: Boolean get() = this == Whoop4 || this == Whoop5MG
     val whoopModel: WhoopModel?
         get() = when (this) {
             Whoop4 -> WhoopModel.WHOOP4
             Whoop5MG -> WhoopModel.WHOOP5_MG
-            HrStrap -> null
+            else -> null
         }
+
+    /** True for the EXPERIMENTAL tier (shown under a clearly-labelled "Experimental" heading). */
+    val isExperimental: Boolean get() = this == Amazfit || this == MiBand || this == Garmin || this == Oura
 
     val title: String
         get() = when (this) {
             Whoop5MG -> "WHOOP 5.0 / MG"
             Whoop4 -> "WHOOP 4.0"
             HrStrap -> "Heart-rate strap"
+            GymEquipment -> "Gym equipment"
+            Amazfit -> "Amazfit / Zepp"
+            MiBand -> "Xiaomi Mi Band"
+            Garmin -> "Garmin watch"
+            Oura -> "Oura ring"
         }
 }
 
@@ -101,22 +113,38 @@ fun AddDeviceWizard(viewModel: AppViewModel, onClose: () -> Unit) {
     // The chosen strap, in whichever shape its path produces.
     var pickedWhoop by remember { mutableStateOf<WhoopBleClient.DiscoveredWhoop?>(null) }
     var pickedStrap by remember { mutableStateOf<StandardHrSource.DiscoveredStrap?>(null) }
+    var pickedMachine by remember { mutableStateOf<com.noop.ble.FtmsSource.DiscoveredMachine?>(null) }
+    var pickedHuami by remember { mutableStateOf<com.noop.ble.HuamiHrSource.DiscoveredDevice?>(null) }
 
     var nameDraft by remember { mutableStateOf("") }
     var askMakeActive by remember { mutableStateOf(false) }
 
-    // Discovery-only HR source for the strap path. Never persists, never connects — we only read its
-    // `discovered` / `scanning` StateFlows while scanning. Created once per wizard.
+    // Discovery-only HR source for the strap path (also Garmin Broadcast HR). Never persists, never
+    // connects — we only read its `discovered` / `scanning` StateFlows while scanning. Created once.
     val hrScanner = remember { viewModel.makeStrapScanner() }
+    // Discovery-only FTMS source for the gym-equipment path. Same throwaway contract.
+    val ftmsScanner = remember { viewModel.makeFtmsScanner() }
+    // Discovery-only EXPERIMENTAL Huami scanner (Amazfit / Zepp / Mi Band).
+    val huamiScanner = remember { viewModel.makeHuamiScanner() }
+    // Discovery-only EXPERIMENTAL Oura probe (detect → honest dead-end → file import).
+    val ouraScanner = remember { viewModel.makeOuraScanner() }
 
     fun startScan(t: DeviceType) {
-        if (t.isWhoop) viewModel.presentWhoopScan(t.whoopModel ?: WhoopModel.WHOOP4)
-        else hrScanner.scan()
+        when {
+            t.isWhoop -> viewModel.presentWhoopScan(t.whoopModel ?: WhoopModel.WHOOP4)
+            t == DeviceType.GymEquipment -> ftmsScanner.scan()
+            t == DeviceType.Amazfit || t == DeviceType.MiBand -> huamiScanner.scan()
+            t == DeviceType.Oura -> ouraScanner.scan()
+            else -> hrScanner.scan()   // HrStrap AND Garmin (Broadcast HR is the standard 0x180D path)
+        }
     }
 
     fun stopAllScans() {
         viewModel.stopWhoopScan()
         hrScanner.stopScan()
+        ftmsScanner.stopScan()
+        huamiScanner.stopScan()
+        ouraScanner.stop()
     }
 
     // Belt-and-braces: stop whichever scan is live whenever the wizard leaves composition.
@@ -130,7 +158,7 @@ fun AddDeviceWizard(viewModel: AppViewModel, onClose: () -> Unit) {
             WizardStep.Confirm -> {
                 // Re-enter the pick step and restart its scan so the user can choose a different device.
                 type?.let { startScan(it) }
-                pickedWhoop = null; pickedStrap = null
+                pickedWhoop = null; pickedStrap = null; pickedMachine = null; pickedHuami = null
                 step = WizardStep.Pick
             }
         }
@@ -139,21 +167,30 @@ fun AddDeviceWizard(viewModel: AppViewModel, onClose: () -> Unit) {
     val confirmAdvertisedName = run {
         pickedWhoop?.let { return@run it.name?.takeIf { n -> n.isNotBlank() } ?: (type?.title ?: "Device") }
         pickedStrap?.let { return@run it.name }
+        pickedMachine?.let { return@run it.name }
+        pickedHuami?.let { return@run it.name }
         type?.title ?: "Device"
     }
     val confirmName = nameDraft.trim().ifEmpty { confirmAdvertisedName }
     val confirmBrand = when {
         type?.isWhoop == true -> "WHOOP"
+        type == DeviceType.GymEquipment -> "Gym equipment"
+        type == DeviceType.Amazfit -> "Amazfit"
+        type == DeviceType.MiBand -> "Mi Band"
+        type == DeviceType.Garmin -> "Garmin"
         pickedStrap != null -> brandGuess(pickedStrap!!.name)
         else -> "Heart-rate strap"
     }
-    val confirmRssi = pickedWhoop?.rssi ?: pickedStrap?.rssi ?: -70
+    val confirmRssi = pickedWhoop?.rssi ?: pickedStrap?.rssi ?: pickedMachine?.rssi ?: pickedHuami?.rssi ?: -70
 
     fun finishAdd(makeActive: Boolean) {
         stopAllScans()
         val now = System.currentTimeMillis() / 1000
         val pw = pickedWhoop
         val ps = pickedStrap
+        val pm = pickedMachine
+        val ph = pickedHuami
+        val isGarmin = type == DeviceType.Garmin
         val device: PairedDeviceRow? = when {
             pw != null && type?.whoopModel != null -> {
                 // WHOOP: full capability set; id namespaced by address; model "4.0" / "5.0 MG".
@@ -173,15 +210,50 @@ fun AddDeviceWizard(viewModel: AppViewModel, onClose: () -> Unit) {
                 )
             }
             ps != null -> {
-                // Generic HR strap: HR + HRV only.
+                // Generic HR strap OR a Garmin broadcasting standard HR. Garmin is registered as a
+                // `liveBLE` device (its live HR IS the standard 0x180D path) but branded "Garmin"; both
+                // are HR + HRV.
                 PairedDeviceRow(
-                    id = "strap-${ps.address}",
-                    brand = brandGuess(ps.name),
+                    id = "${if (isGarmin) "garmin" else "strap"}-${ps.address}",
+                    brand = if (isGarmin) "Garmin" else brandGuess(ps.name),
                     model = ps.name,
                     nickname = if (confirmName == ps.name) null else confirmName,
                     peripheralId = ps.address,
                     sourceKind = SourceKind.liveBLE.name,
                     capabilities = "hr,hrv",
+                    status = DeviceStatus.paired.name,
+                    addedAt = now,
+                    lastSeenAt = now,
+                )
+            }
+            ph != null -> {
+                // EXPERIMENTAL Amazfit / Zepp / Mi Band. sourceKind "huami" routes the SourceCoordinator
+                // to the HuamiHrSource. HR only (the Huami custom characteristic carries no R-R).
+                val brand = if (type == DeviceType.MiBand) "Mi Band" else "Amazfit"
+                PairedDeviceRow(
+                    id = "huami-${ph.address}",
+                    brand = brand,
+                    model = ph.name,
+                    nickname = if (confirmName == ph.name) null else confirmName,
+                    peripheralId = ph.address,
+                    sourceKind = SourceKind.huami.name,
+                    capabilities = "hr",
+                    status = DeviceStatus.paired.name,
+                    addedAt = now,
+                    lastSeenAt = now,
+                )
+            }
+            pm != null -> {
+                // FTMS gym machine: a live machine + (when reported) HR session, recorded via the existing
+                // live-workout path. sourceKind "ftms" routes the SourceCoordinator to the FtmsSource.
+                PairedDeviceRow(
+                    id = "ftms-${pm.address}",
+                    brand = "Gym equipment",
+                    model = pm.name,
+                    nickname = if (confirmName == pm.name) null else confirmName,
+                    peripheralId = pm.address,
+                    sourceKind = SourceKind.ftms.name,
+                    capabilities = "hr",
                     status = DeviceStatus.paired.name,
                     addedAt = now,
                     lastSeenAt = now,
@@ -228,22 +300,49 @@ fun AddDeviceWizard(viewModel: AppViewModel, onClose: () -> Unit) {
                     PrepStep(t, onScan = { startScan(t); step = WizardStep.Pick })
                 }
                 WizardStep.Pick -> type?.let { t ->
-                    if (t.isWhoop) {
-                        WhoopPickStep(
+                    when {
+                        t.isWhoop -> WhoopPickStep(
                             viewModel = viewModel,
                             onSelect = { strap ->
-                                pickedWhoop = strap; pickedStrap = null
+                                pickedWhoop = strap; pickedStrap = null; pickedMachine = null; pickedHuami = null
                                 nameDraft = strap.name?.takeIf { it.isNotBlank() } ?: t.title
                                 viewModel.stopWhoopScan()
                                 step = WizardStep.Confirm
                             },
                             onRescan = { viewModel.presentWhoopScan(t.whoopModel ?: WhoopModel.WHOOP4) },
                         )
-                    } else {
-                        HrPickStep(
+                        t == DeviceType.GymEquipment -> FtmsPickStep(
+                            scanner = ftmsScanner,
+                            onSelect = { machine ->
+                                pickedMachine = machine
+                                pickedWhoop = null; pickedStrap = null; pickedHuami = null
+                                nameDraft = machine.name
+                                ftmsScanner.stopScan()
+                                step = WizardStep.Confirm
+                            },
+                            onRescan = { ftmsScanner.scan() },
+                        )
+                        t == DeviceType.Amazfit || t == DeviceType.MiBand -> HuamiPickStep(
+                            scanner = huamiScanner,
+                            onSelect = { dev ->
+                                pickedHuami = dev
+                                pickedWhoop = null; pickedStrap = null; pickedMachine = null
+                                nameDraft = dev.name
+                                huamiScanner.stopScan()
+                                step = WizardStep.Confirm
+                            },
+                            onRescan = { huamiScanner.scan() },
+                        )
+                        t == DeviceType.Oura -> OuraPickStep(
+                            scanner = ouraScanner,
+                            onUseImport = { ouraScanner.stopScan(); onClose() },
+                        )
+                        else -> HrPickStep(
+                            // Heart-rate strap AND Garmin (Broadcast HR is the standard 0x180D path).
                             scanner = hrScanner,
                             onSelect = { strap ->
-                                pickedStrap = strap; pickedWhoop = null
+                                pickedStrap = strap
+                                pickedWhoop = null; pickedMachine = null; pickedHuami = null
                                 nameDraft = strap.name
                                 hrScanner.stopScan()
                                 step = WizardStep.Confirm
@@ -322,13 +421,51 @@ private fun TypeStep(onPick: (DeviceType) -> Unit) {
         TypeRow(Icons.Filled.FavoriteBorder, DeviceType.HrStrap.title, "Polar, Wahoo, Coospo, Garmin HRM, Amazfit Helio broadcast") {
             onPick(DeviceType.HrStrap)
         }
+        TypeRow(Icons.AutoMirrored.Filled.DirectionsRun, DeviceType.GymEquipment.title, "Treadmill, indoor bike, rower or cross-trainer (Bluetooth FTMS)") {
+            onPick(DeviceType.GymEquipment)
+        }
 
-        Overline("Coming soon", modifier = Modifier.padding(top = 8.dp))
-        ComingSoonRow(Icons.Filled.Watch, "Garmin watch")
-        ComingSoonRow(Icons.Filled.GraphicEq, "Amazfit / Zepp")
-        ComingSoonRow(Icons.Filled.FileDownload, "Import from Oura or Fitbit")
+        // EXPERIMENTAL tier — clearly labelled, opt-in, best-effort. Each is honest about what it can
+        // actually read; none fabricates data.
+        Overline("Experimental", modifier = Modifier.padding(top = 8.dp))
+        ExperimentalTierNote()
+        TypeRow(Icons.Filled.GraphicEq, DeviceType.Amazfit.title, "Incl. Helio. Live heart rate where the band exposes it. Help us test.") {
+            onPick(DeviceType.Amazfit)
+        }
+        TypeRow(Icons.Filled.GraphicEq, DeviceType.MiBand.title, "Live heart rate on bands that don't need pairing. Help us test.") {
+            onPick(DeviceType.MiBand)
+        }
+        TypeRow(Icons.Filled.Watch, DeviceType.Garmin.title, "Uses the watch's Broadcast Heart Rate. We'll show you how.") {
+            onPick(DeviceType.Garmin)
+        }
+        TypeRow(Icons.Filled.FileDownload, DeviceType.Oura.title, "Live isn't available. We'll check, then point you to file import.") {
+            onPick(DeviceType.Oura)
+        }
 
         WhoopFirstNote()
+    }
+}
+
+/** A shared "this tier is experimental" note shown on the type-list heading and every experimental prep
+ *  step. Honest, US-neutral, no em-dashes. */
+@Composable
+private fun ExperimentalTierNote() {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(Palette.statusWarning.copy(alpha = 0.10f))
+            .padding(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Icon(Icons.Filled.Science, contentDescription = null, tint = Palette.statusWarning, modifier = Modifier.size(18.dp))
+        Text(
+            "Experimental, best-effort support. We're still testing these, so they might not connect on " +
+                "every device. They never make up data, and they'll tell you honestly when live isn't possible.",
+            style = NoopType.footnote,
+            color = Palette.statusWarning,
+        )
     }
 }
 
@@ -360,24 +497,6 @@ private fun TypeRow(icon: ImageVector, title: String, subtitle: String, onClick:
 }
 
 @Composable
-private fun ComingSoonRow(icon: ImageVector, title: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .frostedCardSurface(cornerRadius = 14.dp)
-            .padding(16.dp)
-            .semantics { contentDescription = "$title, coming soon" },
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(icon, contentDescription = null, tint = Palette.textTertiary, modifier = Modifier.size(28.dp))
-        Text(title, style = NoopType.headline, color = Palette.textTertiary, modifier = Modifier.weight(1f))
-        StatePill("Soon", tone = StrandTone.Neutral, showsDot = false)
-    }
-}
-
-@Composable
 private fun WhoopFirstNote() {
     Row(
         modifier = Modifier.padding(top = 8.dp),
@@ -401,7 +520,13 @@ private fun PrepStep(type: DeviceType, onScan: () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(
-                if (type.isWhoop) Icons.Filled.Watch else Icons.Filled.FavoriteBorder,
+                when {
+                    type.isWhoop || type == DeviceType.Garmin -> Icons.Filled.Watch
+                    type == DeviceType.GymEquipment -> Icons.AutoMirrored.Filled.DirectionsRun
+                    type == DeviceType.Amazfit || type == DeviceType.MiBand -> Icons.Filled.GraphicEq
+                    type == DeviceType.Oura -> Icons.Filled.FileDownload
+                    else -> Icons.Filled.FavoriteBorder
+                },
                 contentDescription = null,
                 tint = Palette.accent,
                 modifier = Modifier.size(28.dp),
@@ -426,6 +551,8 @@ private fun PrepStep(type: DeviceType, onScan: () -> Unit) {
                     color = Palette.statusWarning,
                 )
             }
+        } else if (type.isExperimental) {
+            ExperimentalTierNote()
         }
 
         Column(
@@ -474,6 +601,27 @@ private fun prepInstructions(type: DeviceType): List<String> = when (type) {
         "Make sure it isn't connected to another app (a bike computer, the brand's own app…).",
         "NOOP will look for it nearby.",
     )
+    DeviceType.GymEquipment -> listOf(
+        "Wake the machine — start pedalling, walking or rowing so it powers on its Bluetooth.",
+        "Make sure it isn't already connected to another app (Zwift, the gym's app, a bike computer…).",
+        "NOOP looks for machines that broadcast the standard Bluetooth Fitness Machine service.",
+    )
+    DeviceType.Amazfit -> listOf(
+        "Wake your Amazfit / Zepp band and make sure it isn't connected to the Zepp app right now.",
+        "NOOP reads live heart rate when the band exposes it. Some bands need a pairing we can't do yet — if so, we'll say so honestly.",
+        "Experimental: this is best-effort. If live doesn't work, you can export from Zepp and import the file.",
+    )
+    DeviceType.MiBand -> listOf(
+        "Wake your Mi Band and make sure it isn't connected to the Mi Fitness / Zepp Life app right now.",
+        "NOOP reads live heart rate on bands that don't require pairing. Newer bands need an auth handshake we can't do yet.",
+        "Experimental: if your band needs pairing, we'll tell you honestly rather than show a fake reading.",
+    )
+    DeviceType.Garmin -> com.noop.ble.GarminBroadcast.broadcastHint
+    DeviceType.Oura -> listOf(
+        "The Oura ring is proprietary and only syncs to the Oura app, so there's no open live stream NOOP can read.",
+        "We'll scan for your ring and check its Bluetooth services so you can see we looked.",
+        "Then we'll point you at file import, which is the honest way to get your Oura data into NOOP.",
+    )
 }
 
 // MARK: - Step 3 — pick from the live scan
@@ -513,6 +661,125 @@ private fun HrPickStep(
                 rssi = strap.rssi,
                 onTap = { onSelect(strap) },
             )
+        }
+    }
+}
+
+@Composable
+private fun FtmsPickStep(
+    scanner: com.noop.ble.FtmsSource,
+    onSelect: (com.noop.ble.FtmsSource.DiscoveredMachine) -> Unit,
+    onRescan: () -> Unit,
+) {
+    val discovered by scanner.discovered.collectAsStateWithLifecycle()
+    val scanning by scanner.scanning.collectAsStateWithLifecycle()
+    PickList(searching = scanning, isEmpty = discovered.isEmpty(), onRescan = onRescan) {
+        discovered.sortedByDescending { it.rssi }.forEach { machine ->
+            DiscoveredRow(
+                name = machine.name,
+                subtitle = "Gym equipment",
+                rssi = machine.rssi,
+                onTap = { onSelect(machine) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun HuamiPickStep(
+    scanner: com.noop.ble.HuamiHrSource,
+    onSelect: (com.noop.ble.HuamiHrSource.DiscoveredDevice) -> Unit,
+    onRescan: () -> Unit,
+) {
+    val discovered by scanner.discovered.collectAsStateWithLifecycle()
+    val scanning by scanner.scanning.collectAsStateWithLifecycle()
+    PickList(searching = scanning, isEmpty = discovered.isEmpty(), onRescan = onRescan) {
+        discovered.sortedByDescending { it.rssi }.forEach { dev ->
+            DiscoveredRow(
+                name = dev.name,
+                subtitle = "Experimental",
+                rssi = dev.rssi,
+                onTap = { onSelect(dev) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun OuraPickStep(
+    scanner: com.noop.ble.OuraProbeSource,
+    onUseImport: () -> Unit,
+) {
+    val discovered by scanner.discovered.collectAsStateWithLifecycle()
+    val scanning by scanner.scanning.collectAsStateWithLifecycle()
+    val deadEnd by scanner.deadEndMessage.collectAsStateWithLifecycle()
+    Column(verticalArrangement = Arrangement.spacedBy(Metrics.gap)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StatePill(
+                if (scanning) "Searching…" else "Idle",
+                tone = if (scanning) StrandTone.Accent else StrandTone.Neutral,
+                pulsing = scanning,
+            )
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = { scanner.scan() }) {
+                Text("Rescan", style = NoopType.subhead, color = Palette.accent)
+            }
+        }
+        val msg = deadEnd
+        when {
+            msg != null -> {
+                // The honest dead-end: no open live stream → file import.
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .frostedCardSurface(cornerRadius = 14.dp)
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(msg, style = NoopType.body, color = Palette.textPrimary)
+                    TextButton(
+                        onClick = onUseImport,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Palette.accent)
+                            .semantics { contentDescription = "Use file import for Oura" },
+                    ) {
+                        Text("Use file import", style = NoopType.headline, color = Palette.goldDeepText)
+                    }
+                }
+            }
+            discovered.isEmpty() -> {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .frostedCardSurface(cornerRadius = 14.dp)
+                        .padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    CircularProgressIndicator(color = Palette.accent, modifier = Modifier.size(22.dp))
+                    Text("Searching…", style = NoopType.body, color = Palette.textPrimary)
+                    Text(
+                        "Make sure it's awake and not connected elsewhere.",
+                        style = NoopType.subhead,
+                        color = Palette.textSecondary,
+                    )
+                }
+            }
+            else -> {
+                // Found a ring (or rings): tap to probe so the user sees we genuinely looked.
+                Column(verticalArrangement = Arrangement.spacedBy(Metrics.gap)) {
+                    discovered.sortedByDescending { it.rssi }.forEach { ring ->
+                        DiscoveredRow(
+                            name = ring.name,
+                            subtitle = "Tap to check",
+                            rssi = ring.rssi,
+                            onTap = { scanner.probe(ring.address) },
+                        )
+                    }
+                }
+            }
         }
     }
 }

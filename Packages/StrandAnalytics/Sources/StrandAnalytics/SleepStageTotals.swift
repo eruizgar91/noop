@@ -70,6 +70,62 @@ public enum SleepStageTotals {
                           deepMin: total.deep, remMin: total.rem, lightMin: total.light)
     }
 
+    // MARK: - Canonical main-night selection (#525)
+
+    /// Local hour (inclusive) at/after which a sleep onset counts as the start of a real OVERNIGHT
+    /// (≥ 20:00). Below `overnightEndHour` (< 10:00) also counts. This is the exact window the Sleep
+    /// tab's `SleepView.isOvernightOnset` uses — kept here as the single shared definition so the
+    /// daily aggregate and the on-screen "your night" figure pick the SAME block. (#525)
+    public static let overnightStartHour = 20
+    /// Local hour (exclusive) before which a sleep onset still counts as overnight (an early-morning
+    /// wake-and-bed). A block onset in [overnightEndHour, overnightStartHour) is daytime — a nap.
+    public static let overnightEndHour = 10
+
+    /// One candidate block for main-night selection. The `start` is the EFFECTIVE onset (a user wake/
+    /// bed edit moves `end`, never the detected onset key), and `tzOffsetSeconds` turns it local so the
+    /// overnight test reads the user's clock, not UTC.
+    public struct NightBlock {
+        public let start: Int, end: Int
+        public init(start: Int, end: Int) { self.start = start; self.end = end }
+        public var durationS: Int { end - start }
+    }
+
+    /// True when a block's onset falls in the overnight window (≥ `overnightStartHour` or
+    /// < `overnightEndHour`, local). Mirrors `SleepView.isOvernightOnset` so the analytics rollup and
+    /// the Sleep tab agree on which block is the night. `offsetSec` is seconds EAST of UTC. (#525)
+    public static func isOvernightOnset(_ ts: Int, offsetSec: Int) -> Bool {
+        let local = ts + offsetSec
+        let secOfDay = ((local % 86_400) + 86_400) % 86_400
+        let hour = secOfDay / 3_600
+        return hour >= overnightStartHour || hour < overnightEndHour
+    }
+
+    /// Index of the day's MAIN night among `blocks`: the LONGEST block, preferring an OVERNIGHT-anchored
+    /// onset so a long lazy afternoon nap can't out-rank a slightly shorter real night. This is the SAME
+    /// rule the Sleep tab's hero / `editTarget` / `mainBlock` use, so the daily total and the on-screen
+    /// "your night" figure resolve to the identical block. Returns nil only for an empty list. Ties are
+    /// broken toward the EARLIER block (stable, deterministic) so two equal-length blocks always pick the
+    /// same winner across platforms. (#525)
+    public static func mainNightIndex(_ blocks: [NightBlock], offsetSec: Int) -> Int? {
+        guard !blocks.isEmpty else { return nil }
+        var bestIdx = 0
+        for i in 1..<blocks.count {
+            let cand = blocks[i], best = blocks[bestIdx]
+            let candON = isOvernightOnset(cand.start, offsetSec: offsetSec)
+            let bestON = isOvernightOnset(best.start, offsetSec: offsetSec)
+            let candWins: Bool
+            if candON != bestON {
+                candWins = candON                                   // an overnight block always beats a daytime one
+            } else if cand.durationS != best.durationS {
+                candWins = cand.durationS > best.durationS          // same kind → the longer wins
+            } else {
+                candWins = cand.start < best.start                  // exact tie → earlier onset (stable)
+            }
+            if candWins { bestIdx = i }
+        }
+        return bestIdx
+    }
+
     /// The night's daily sleep aggregate, substituting any USER-EDITED block for its detected twin
     /// before summing, then UNIONING in any user-added block that has no detected twin. `detected` is
     /// the auto-detected blocks (their stable startTs + stages); `edited` maps a block's startTs → its
@@ -85,31 +141,85 @@ public enum SleepStageTotals {
     public static func dailyAggregateHonoringEdits(
         detected: [(startTs: Int, stagesJSON: String?)],
         edited: [Int: String?],
-        manual: [(startTs: Int, stagesJSON: String?)] = []
+        manual: [(startTs: Int, stagesJSON: String?)] = [],
+        // The block's effective onset (a wake/bed edit moves end, not the detected start key) plus the
+        // device's UTC offset, so the MAIN-NIGHT pick reads the user's local clock. When a caller can't
+        // supply onsets, leave nil and the legacy SUM-of-all-blocks behaviour is preserved (no regression
+        // for older callers); the day rollup passes them so the daily total matches the Sleep tab. (#525)
+        onsetByStart: [Int: Int]? = nil,
+        offsetSec: Int = 0
     ) -> (sleep: DailySleep, editApplied: Bool)? {
         // Substitute an edited block's stages ONLY when the edit has usable (non-nil) stages — an edit
         // that reshaped to nil must fall back to the detected stages, never drop the block (which would
-        // collapse the night's sleep total). `editApplied` likewise reflects a real substitution.
+        // collapse the night's sleep total). `editApplied` likewise reflects a real substitution. We keep
+        // each block's identity (its startTs + effective stages) so the main-night pick can run after.
         var applied = false
-        var effective: [String?] = detected.map { d in
+        // (startTs, effective stages) for every block on the day — detected (edit-substituted) then any
+        // twinless manual block UNIONED in. Identity is preserved for the main-night selection.
+        var blocks: [(startTs: Int, stagesJSON: String?)] = detected.map { d in
             if let stages = edited[d.startTs] ?? nil {   // flatten String?? → String?, then require non-nil
                 applied = true
-                return stages
+                return (startTs: d.startTs, stagesJSON: stages)
             }
-            return d.stagesJSON
+            return (startTs: d.startTs, stagesJSON: d.stagesJSON)
         }
-        // Union: a user-added block the detector never found (no detected twin) must still fold its
-        // minutes into the day, otherwise a manually-logged nap is silently dropped from Rest. Match on
-        // the stable startTs and add ONLY rows absent from `detected` (so a detector-found block already
-        // summed above is never double-counted), and only when the block has usable (non-nil) stages.
+        // Union: a user-added block the detector never found (no detected twin) must still be on the day
+        // so the main-night pick (or the legacy sum) sees it — otherwise a manually-logged nap is dropped.
+        // Match on the stable startTs and add ONLY rows absent from `detected`, with usable stages.
         let detectedStarts = Set(detected.map(\.startTs))
         for m in manual where !detectedStarts.contains(m.startTs) {
             if let stages = m.stagesJSON {
-                effective.append(stages)
+                blocks.append((startTs: m.startTs, stagesJSON: stages))
                 applied = true
             }
         }
-        guard let agg = dailyAggregate(effective) else { return nil }
+        // Canonical per-day total (#525): when the caller supplies block onsets, the daily figure is the
+        // MAIN NIGHT only (the longest, overnight-preferring block — the SAME block the Sleep tab shows),
+        // so Intelligence / Sleep Need / the debt ledger / the card all read the same number as the Sleep
+        // tab. Nap blocks stay their own session rows elsewhere; they are NOT summed into this figure.
+        // No onsets supplied → the legacy sum-of-all-blocks total (older callers unchanged).
+        if let onsetByStart {
+            // Pick by the same rule as the Sleep tab — overnight-preferring, then longest (measured by
+            // each block's decoded in-bed minutes) — and report ONLY that block's totals as the day's
+            // figure. A day's naps are unaffected here; they remain their own session rows.
+            if let idx = mainNightIndexByStages(blocks, onsetByStart: onsetByStart, offsetSec: offsetSec),
+               let agg = dailyAggregate([blocks[idx].stagesJSON]) {
+                return (agg, applied)
+            }
+            return nil
+        }
+        guard let agg = dailyAggregate(blocks.map(\.stagesJSON)) else { return nil }
         return (agg, applied)
+    }
+
+    /// Index into `blocks` of the day's MAIN night, ranked by the SAME rule the Sleep tab uses
+    /// (overnight-preferring, then longest), but measuring "longest" by each block's decoded asleep+awake
+    /// minutes (its real in-bed span) rather than a synthetic end. `onsetByStart` gives each block's
+    /// effective onset for the overnight test. Blocks whose stages don't decode are still candidates with
+    /// a 0-minute span, so a day of only-undecodable blocks still resolves deterministically. (#525)
+    static func mainNightIndexByStages(_ blocks: [(startTs: Int, stagesJSON: String?)],
+                                       onsetByStart: [Int: Int], offsetSec: Int) -> Int? {
+        guard !blocks.isEmpty else { return nil }
+        func span(_ b: (startTs: Int, stagesJSON: String?)) -> Double {
+            minutes(fromStagesJSON: b.stagesJSON)?.inBed ?? 0
+        }
+        func onset(_ b: (startTs: Int, stagesJSON: String?)) -> Int { onsetByStart[b.startTs] ?? b.startTs }
+        var bestIdx = 0
+        for i in 1..<blocks.count {
+            let cand = blocks[i], best = blocks[bestIdx]
+            let candON = isOvernightOnset(onset(cand), offsetSec: offsetSec)
+            let bestON = isOvernightOnset(onset(best), offsetSec: offsetSec)
+            let candSpan = span(cand), bestSpan = span(best)
+            let candWins: Bool
+            if candON != bestON {
+                candWins = candON
+            } else if candSpan != bestSpan {
+                candWins = candSpan > bestSpan
+            } else {
+                candWins = onset(cand) < onset(best)
+            }
+            if candWins { bestIdx = i }
+        }
+        return bestIdx
     }
 }

@@ -84,6 +84,14 @@ object Baselines {
      *  EXACT same key string as the iOS UserDefaults key. */
     const val hrvBaselineEpochKey: String = "noop.hrvBaselineEpoch"
 
+    /** SharedPreferences key for the manual RECOVERY-baseline recalibration epoch (epoch SECONDS).
+     *  0 / absent = no recalibration. The Charge-wide sibling of [hrvBaselineEpochKey]: HRV (the
+     *  dominant Charge driver) re-anchors on its own epoch today, while the resting-HR / respiration /
+     *  skin-temp baselines that also feed Charge re-anchor on THIS epoch. The Settings "Recalibrate
+     *  Charge baseline" button writes BOTH keys to now (see [recalibrateRecoveryBaselines]) so the whole
+     *  Charge build-up restarts cleanly. EXACT same key string as the iOS UserDefaults key. */
+    const val recoveryBaselineEpochKey: String = "noop.recoveryBaselineEpoch"
+
     /** Default per-metric configurations (HRV, resting HR, respiration, skin temp). */
     val metricCfg: Map<String, MetricCfg> = mapOf(
         "hrv" to MetricCfg(
@@ -355,5 +363,27 @@ object Baselines {
             nightsSinceUpdate = 0,
             status = computeStatus(n, 0),
         )
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Manual recalibration ("Recalibrate Charge baseline")
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Recalibrate every baseline that feeds Charge: drop the anchor so the ~4-night build-up restarts
+     * from [nowSeconds]. This is the single source of truth behind the Settings "Recalibrate Charge
+     * baseline" button — it writes [nowSeconds] (epoch SECONDS, whole) to BOTH the HRV epoch and the
+     * recovery epoch, so HRV (the dominant driver, already wired) and the resting-HR / respiration /
+     * skin-temp baselines re-anchor together. It does NOT delete any stored day: only the day from
+     * which the baselines re-learn moves. After this the next foldHistory re-seeds from the first
+     * on-or-after-[nowSeconds] night, so Today honestly shows the calibrating/building state again.
+     *
+     * The analytics layer is Context-free, so the caller passes in the prefs editor. Epochs are stored
+     * as whole seconds in a Long (SharedPreferences has no putDouble; the readers do getLong→toDouble),
+     * matching the "epoch SECONDS" the keys document and the iOS UserDefaults values byte-for-byte.
+     */
+    fun recalibrateRecoveryBaselines(editor: android.content.SharedPreferences.Editor, nowSeconds: Long) {
+        editor.putLong(hrvBaselineEpochKey, nowSeconds)
+        editor.putLong(recoveryBaselineEpochKey, nowSeconds)
     }
 }

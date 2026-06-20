@@ -59,8 +59,13 @@ data class DayOwnershipRow(
 /** Lifecycle of a paired device. Stored as the lowercase enum name (Swift `DeviceStatus` rawValue). */
 enum class DeviceStatus { active, paired, archived }
 
-/** How a device's data reaches the store. Stored as the enum name (Swift `SourceKind` rawValue). */
-enum class SourceKind { liveBLE, historyBLE, cloudImport, fileImport }
+/** How a device's data reaches the store. Stored as the enum name (Swift `SourceKind` rawValue).
+ *  [ftms] = a live FTMS gym machine (treadmill / indoor bike / rower / cross-trainer).
+ *  [huami] = an EXPERIMENTAL Huami-family live HR source (Amazfit / Zepp incl. Helio, Xiaomi Mi Band):
+ *  standard 0x180D when exposed, else the documented Huami custom HR characteristic, else an honest
+ *  "needs pairing" message. (Garmin uses [liveBLE] — its live HR is the standard broadcast-HR path.)
+ *  Additive: existing rows never carry [ftms]/[huami]; only the respective wizard paths write them. */
+enum class SourceKind { liveBLE, historyBLE, cloudImport, fileImport, ftms, huami }
 
 /** A canonical metric a source can provide — drives capability-aware UI + the day-owner resolver.
  *  Stored as the enum name (Swift `Metric` rawValue) inside the comma-joined `capabilities` string. */
