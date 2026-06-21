@@ -573,11 +573,13 @@ paywall. The Android Support screen should reuse the same addresses as the macOS
 | BTC | Bitcoin | `bc1qn2gkl7wslwpws06mvazjn2uu689zlkv7kg3kf5` |
 | ADA | Cardano | `addr1qxsju3y0mlke2h6h2g6qgnq4r3jstngtyjxs0nnp5zrv28zv8p5rgzruxyjz33j9k23pffta8z639e2snjdd4vcetfqsn4vwr3` |
 | ETH | Ethereum | `0xd64D508b531c4b1297Ca4023C774e0E97aA67B7F` |
-| XRP | XRP | `rpvijHi2nVY9WWAJhojsAX5tJmHdmLtFhq` |
+| XRP | XRP | `rpvijHi2nVY9WWAJhojsAX5tJmHdmLtFhq` — **Destination Tag `3338312747` (required)** |
 
-Present them as copyable rows with a copy-to-clipboard action and accessible labels, mirroring
-`Strand/Screens/SupportView.swift`. Keep the screen attribution-first (credit the upstream
-reverse-engineering) with donations clearly marked optional.
+The XRP row **must surface the destination tag `3338312747`** as its own copyable line with a clear
+"required — XRP sent without it may be lost" note (it's a `tag` field on the address model, rendered
+only when present). Present them as copyable rows with a copy-to-clipboard action and accessible
+labels, mirroring `Strand/Screens/SupportView.swift`. Keep the screen attribution-first (credit the
+upstream reverse-engineering) with donations clearly marked optional.
 
 ---
 

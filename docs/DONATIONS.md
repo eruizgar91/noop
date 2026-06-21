@@ -86,7 +86,9 @@ transactions are irreversible, and only ever send a coin to its matching network
 | **BTC** | Bitcoin | `bc1qn2gkl7wslwpws06mvazjn2uu689zlkv7kg3kf5` |
 | **ADA** | Cardano | `addr1qxsju3y0mlke2h6h2g6qgnq4r3jstngtyjxs0nnp5zrv28zv8p5rgzruxyjz33j9k23pffta8z639e2snjdd4vcetfqsn4vwr3` |
 | **ETH** | Ethereum | `0xd64D508b531c4b1297Ca4023C774e0E97aA67B7F` |
-| **XRP** | XRP Ledger | `rpvijHi2nVY9WWAJhojsAX5tJmHdmLtFhq` |
+| **XRP** | XRP Ledger | `rpvijHi2nVY9WWAJhojsAX5tJmHdmLtFhq`<br>⚠️ **Destination Tag: `3338312747` (required)** |
+
+> ⚠️ **XRP needs a destination tag.** This XRP address **requires the destination tag `3338312747`**. XRP sent without it cannot be credited and may be lost. When you send, paste the tag into your wallet's / exchange's **"Destination Tag"** field (it's a normal, required field for XRP).
 
 ### Copyable addresses
 
@@ -108,17 +110,23 @@ addr1qxsju3y0mlke2h6h2g6qgnq4r3jstngtyjxs0nnp5zrv28zv8p5rgzruxyjz33j9k23pffta8z6
 0xd64D508b531c4b1297Ca4023C774e0E97aA67B7F
 ```
 
-**XRP (XRP Ledger)**
+**XRP (XRP Ledger)** — address **and** destination tag are both required
 
 ```text
 rpvijHi2nVY9WWAJhojsAX5tJmHdmLtFhq
 ```
 
+Destination Tag (paste into the wallet's "Destination Tag" field):
+
+```text
+3338312747
+```
+
 > The ETH address is a standard EVM address, so it also receives on
 > Ethereum-compatible networks if that's what your wallet uses — but when in
-> doubt, send on Ethereum mainnet. The XRP Ledger uses **destination tags** for
-> some exchange accounts; this is a self-custodied address and needs **no
-> destination tag**.
+> doubt, send on Ethereum mainnet. **The XRP address above requires the
+> destination tag `3338312747`** — XRP is sent with both the address and the
+> tag, and a donation sent without the tag cannot be credited and may be lost.
 
 ---
 
